@@ -1,0 +1,13 @@
+{
+  "name": "tut-project",
+  "version": "1.0.0",
+  "description": "A **100% FREE** cloud-based attendance system using:\r - **Face Recognition** for students\r - **Face + Voice Recognition** for teachers  \r - **Door Camera Tracking** for entry/exit monitoring\r - **MongoDB Atlas** for database (FREE 512MB)\r - **Cloudinary** for media storage (FREE 25GB)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
