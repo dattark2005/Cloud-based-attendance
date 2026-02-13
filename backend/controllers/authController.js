@@ -8,7 +8,7 @@ const { ROLES } = require('../config/constants');
  */
 const register = async (req, res, next) => {
   try {
-    const { email, password, fullName, role, department, studentId } = req.body;
+    const { email, password, fullName, role, department, prn, rollNumber } = req.body;
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -26,7 +26,8 @@ const register = async (req, res, next) => {
       fullName,
       role: role || ROLES.STUDENT,
       department,
-      studentId,
+      prn,
+      rollNumber,
     });
 
     // Generate tokens
@@ -60,7 +61,7 @@ const login = async (req, res, next) => {
 
     // Find user and include password
     const user = await User.findOne({ email }).select('+password');
-    
+
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -78,7 +79,7 @@ const login = async (req, res, next) => {
 
     // Verify password
     const isPasswordValid = await user.comparePassword(password);
-    
+
     if (!isPasswordValid) {
       return res.status(401).json({
         success: false,
@@ -141,7 +142,7 @@ const logout = async (req, res) => {
   // In a stateless JWT system, logout is handled client-side
   // by removing the token. For additional security, you could
   // implement token blacklisting here.
-  
+
   res.json({
     success: true,
     message: 'Logged out successfully',
@@ -169,7 +170,7 @@ const refreshToken = async (req, res, next) => {
 
     // Get user
     const user = await User.findById(decoded.userId);
-    
+
     if (!user || !user.isActive) {
       return res.status(401).json({
         success: false,

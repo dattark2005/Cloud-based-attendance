@@ -1,52 +1,73 @@
 const User = require('../models/User');
 const { uploadToCloudinary } = require('../config/cloudinary');
-const { registerFace, verifyFace, registerVoice, verifyVoice } = require('../utils/apiClient');
-const { CLOUDINARY_FOLDERS, ROLES } = require('../config/constants');
+const { registerFace, batchRegisterFace, verifyFace, registerVoice, verifyVoice } = require('../utils/apiClient');
 
 /**
- * Register face for user
+ * Register face for user (Support multiple angles)
  * POST /api/biometric/face/register
  */
 const registerUserFace = async (req, res, next) => {
   try {
     const userId = req.user._id;
-    const { faceImage } = req.body;
+    const { faceImage, faceImages } = req.body;
 
-    if (!faceImage) {
+    const imagesToProcess = faceImages || (faceImage ? [faceImage] : null);
+
+    if (!imagesToProcess || imagesToProcess.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'Face image is required',
+        message: 'At least one face image is required',
       });
     }
 
-    // Convert base64 to buffer
-    const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-
-    // Upload to Cloudinary
-    const cloudinaryResult = await uploadToCloudinary(
-      `data:image/jpeg;base64,${imageBuffer.toString('base64')}`,
-      CLOUDINARY_FOLDERS.FACES,
-      'image'
+    // Convert base64 array to buffer array
+    const imageBuffers = imagesToProcess.map(img =>
+      Buffer.from(img.replace(/^data:image\/\w+;base64,/, ''), 'base64')
     );
 
-    // Register with Python face recognition service
-    const faceResult = await registerFace(userId.toString(), imageBuffer);
+    let faceResult;
+    try {
+      if (imageBuffers.length > 1) {
+        faceResult = await batchRegisterFace(userId.toString(), imageBuffers);
+      } else {
+        faceResult = await registerFace(userId.toString(), imageBuffers[0]);
+      }
+    } catch (serviceError) {
+      console.warn('⚠️ Python AI service failed or unreachable. Falling back to Mock Registration.');
 
-    // Update user with face data
-    const user = await User.findByIdAndUpdate(
-      userId,
-      {
-        faceEncoding: Buffer.from(JSON.stringify(faceResult.encoding)),
+      // Fallback: Upload to Cloudinary and save a mock vector directly
+      // This allows development to proceed without Python dependencies (face_recognition/dlib)
+      const cloudinaryResult = await uploadToCloudinary(
+        imagesToProcess[0],
+        'attendance/faces'
+      );
+
+      // Create a dummy 128-float vector (serialized)
+      const mockVector = Buffer.alloc(128 * 8); // 128 float64 values (8 bytes each)
+
+      await User.findByIdAndUpdate(userId, {
+        faceEncoding: mockVector,
         faceImageUrl: cloudinaryResult.url,
-        faceRegisteredAt: new Date(),
-      },
-      { new: true }
-    ).select('-password -faceEncoding -voiceEmbedding');
+        faceRegisteredAt: new Date()
+      });
+
+      faceResult = {
+        message: 'Face registered successfully (Mock Mode)',
+        samplesProcessed: imageBuffers.length,
+        mocked: true
+      };
+    }
+
+    const user = await User.findById(userId).select('-password -faceEncoding -voiceEmbedding');
 
     res.json({
       success: true,
-      message: 'Face registered successfully',
-      data: { user },
+      message: faceResult.message,
+      data: {
+        user,
+        samplesProcessed: faceResult.samplesProcessed || 1,
+        mocked: faceResult.mocked || false
+      },
     });
   } catch (error) {
     console.error('Face registration error:', error);
@@ -165,7 +186,7 @@ const registerUserVoice = async (req, res, next) => {
  */
 const verifyUserVoice = async (req, res, next) => {
   try {
-    const { userId, voiceAudio } = req.body;
+    const { userId, voiceAudio, expectedText } = req.body;
     const targetUserId = userId || req.user._id;
 
     if (!voiceAudio) {
@@ -188,7 +209,7 @@ const verifyUserVoice = async (req, res, next) => {
     const audioBuffer = Buffer.from(voiceAudio.replace(/^data:audio\/\w+;base64,/, ''), 'base64');
 
     // Verify with Python voice recognition service
-    const verificationResult = await verifyVoice(targetUserId.toString(), audioBuffer);
+    const verificationResult = await verifyVoice(targetUserId.toString(), audioBuffer, expectedText);
 
     res.json({
       success: true,
@@ -205,9 +226,28 @@ const verifyUserVoice = async (req, res, next) => {
   }
 };
 
+const { generateVerificationSentence } = require('../utils/sentenceGenerator');
+
+/**
+ * Get dynamic verification sentence for teacher voice verification
+ * GET /api/biometric/voice/sentence
+ */
+const getVoiceSentence = async (req, res, next) => {
+  try {
+    const sentence = generateVerificationSentence();
+    res.json({
+      success: true,
+      data: { sentence },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   registerUserFace,
   verifyUserFace,
   registerUserVoice,
   verifyUserVoice,
+  getVoiceSentence,
 };

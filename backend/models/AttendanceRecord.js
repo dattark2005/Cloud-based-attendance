@@ -21,6 +21,17 @@ const attendanceRecordSchema = new mongoose.Schema({
     enum: Object.values(ATTENDANCE_STATUS),
     default: ATTENDANCE_STATUS.PRESENT,
   },
+  cumulativeDurationMinutes: {
+    type: Number,
+    default: 0,
+  },
+  entryExitCount: {
+    type: Number,
+    default: 0,
+  },
+  lastEntryTime: {
+    type: Date,
+  },
   verificationMethod: {
     type: String,
     enum: Object.values(VERIFICATION_METHODS),
@@ -60,7 +71,7 @@ attendanceRecordSchema.index({ studentId: 1, markedAt: -1 });
 attendanceRecordSchema.index({ lectureId: 1 });
 
 // Static method to get attendance statistics
-attendanceRecordSchema.statics.getStudentStats = async function(studentId, startDate, endDate) {
+attendanceRecordSchema.statics.getStudentStats = async function (studentId, startDate, endDate) {
   const stats = await this.aggregate([
     {
       $match: {
@@ -83,7 +94,7 @@ attendanceRecordSchema.statics.getStudentStats = async function(studentId, start
 };
 
 // Static method to get section attendance rate
-attendanceRecordSchema.statics.getSectionAttendanceRate = async function(lectureId) {
+attendanceRecordSchema.statics.getSectionAttendanceRate = async function (lectureId) {
   const lecture = await mongoose.model('Lecture').findById(lectureId).populate('sectionId');
   if (!lecture) return 0;
 

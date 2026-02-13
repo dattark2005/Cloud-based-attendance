@@ -1,6 +1,8 @@
 const Lecture = require('../models/Lecture');
 const AttendanceRequest = require('../models/AttendanceRequest');
 const AttendanceRecord = require('../models/AttendanceRecord');
+const EntryExitLog = require('../models/EntryExitLog');
+const User = require('../models/User');
 const Section = require('../models/Section');
 const { uploadToCloudinary } = require('../config/cloudinary');
 const { verifyFace } = require('../utils/apiClient');
@@ -99,7 +101,7 @@ const markAttendance = async (req, res, next) => {
     if (attendanceRequest.isExpired()) {
       attendanceRequest.status = REQUEST_STATUS.EXPIRED;
       await attendanceRequest.save();
-      
+
       return res.status(400).json({
         success: false,
         message: 'Attendance request has expired',
@@ -168,8 +170,8 @@ const markAttendance = async (req, res, next) => {
     const markedAt = new Date();
     const scheduledStart = lecture.scheduledStart;
     const minutesLate = (markedAt - scheduledStart) / (1000 * 60);
-    const status = minutesLate > DEFAULTS.LATE_THRESHOLD_MINUTES 
-      ? ATTENDANCE_STATUS.LATE 
+    const status = minutesLate > DEFAULTS.LATE_THRESHOLD_MINUTES
+      ? ATTENDANCE_STATUS.LATE
       : ATTENDANCE_STATUS.PRESENT;
 
     // Create attendance record
@@ -193,7 +195,7 @@ const markAttendance = async (req, res, next) => {
     res.status(201).json({
       success: true,
       message: `Attendance marked successfully (${status})`,
-      data: { 
+      data: {
         attendanceRecord: {
           id: attendanceRecord._id,
           status: attendanceRecord.status,
@@ -218,7 +220,7 @@ const getAttendanceHistory = async (req, res, next) => {
 
     // Build filter
     const filter = { studentId: userId };
-    
+
     if (startDate || endDate) {
       filter.markedAt = {};
       if (startDate) filter.markedAt.$gte = new Date(startDate);
@@ -252,7 +254,7 @@ const getAttendanceHistory = async (req, res, next) => {
       absent: 0, // Would need to calculate based on total lectures
     };
 
-    stats.attendanceRate = stats.total > 0 
+    stats.attendanceRate = stats.total > 0
       ? ((stats.present + stats.late) / stats.total * 100).toFixed(2)
       : 0;
 
@@ -345,9 +347,87 @@ const getAttendanceStatus = async (req, res, next) => {
   }
 };
 
+/**
+ * Log entry/exit activity (session tracking)
+ * POST /api/attendance/activity
+ */
+const logActivity = async (req, res, next) => {
+  try {
+    const { userId, lectureId, type, confidence, faceImageUrl } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const lecture = await Lecture.findById(lectureId);
+    if (!lecture) {
+      return res.status(404).json({ success: false, message: 'Lecture not found' });
+    }
+
+    // Determine type automatically if not provided (Toggle)
+    const eventType = type || (user.currentStatus === 'IN' ? 'EXIT' : 'ENTRY');
+
+    // Create entry/exit log
+    const log = await EntryExitLog.create({
+      userId,
+      lectureId,
+      type: eventType,
+      confidence,
+      faceImageUrl
+    });
+
+    // Update user status
+    user.currentStatus = eventType === 'ENTRY' ? 'IN' : 'OUT';
+    user.lastStatusChange = new Date();
+    await user.save();
+
+    // Update AttendanceRecord
+    let attendanceRecord = await AttendanceRecord.findOne({ lectureId, studentId: userId });
+
+    if (!attendanceRecord && eventType === 'ENTRY') {
+      // First time entry - create record
+      attendanceRecord = await AttendanceRecord.create({
+        lectureId,
+        studentId: userId,
+        status: ATTENDANCE_STATUS.PRESENT,
+        lastEntryTime: new Date(),
+        entryExitCount: 1,
+        verificationMethod: 'FACE'
+      });
+    } else if (attendanceRecord) {
+      if (eventType === 'ENTRY') {
+        attendanceRecord.lastEntryTime = new Date();
+        attendanceRecord.entryExitCount += 1;
+      } else if (eventType === 'EXIT' && attendanceRecord.lastEntryTime) {
+        const exitTime = new Date();
+        const durationMs = exitTime - attendanceRecord.lastEntryTime;
+        const durationMins = Math.round(durationMs / (1000 * 60));
+
+        attendanceRecord.cumulativeDurationMinutes += durationMins;
+        attendanceRecord.lastEntryTime = null; // Clear entry time on exit
+      }
+      await attendanceRecord.save();
+    }
+
+    res.json({
+      success: true,
+      message: `${eventType} logged for ${user.fullName}`,
+      data: {
+        log,
+        currentStatus: user.currentStatus,
+        cumulativeDurationMinutes: attendanceRecord ? attendanceRecord.cumulativeDurationMinutes : 0
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createAttendanceRequest,
   markAttendance,
   getAttendanceHistory,
   getAttendanceStatus,
+  logActivity,
 };

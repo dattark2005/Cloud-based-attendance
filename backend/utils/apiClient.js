@@ -14,9 +14,9 @@ const registerFace = async (userId, imageBuffer) => {
   try {
     const formData = new FormData();
     formData.append('user_id', userId);
-    formData.append('image', imageBuffer, { filename: 'face.jpg' });
+    formData.append('file', imageBuffer, { filename: 'face.jpg' });
 
-    const response = await axios.post(`${FACE_SERVICE_URL}/register`, formData, {
+    const response = await axios.post(`${FACE_SERVICE_URL}/register-face`, formData, {
       headers: formData.getHeaders(),
       timeout: 10000,
     });
@@ -28,19 +28,13 @@ const registerFace = async (userId, imageBuffer) => {
   }
 };
 
-/**
- * Verify face with Python face recognition service
- * @param {string} userId - User ID
- * @param {Buffer} imageBuffer - Face image buffer
- * @returns {Promise<object>} Verification result
- */
 const verifyFace = async (userId, imageBuffer) => {
   try {
     const formData = new FormData();
     formData.append('user_id', userId);
-    formData.append('image', imageBuffer, { filename: 'face.jpg' });
+    formData.append('file', imageBuffer, { filename: 'face.jpg' });
 
-    const response = await axios.post(`${FACE_SERVICE_URL}/verify`, formData, {
+    const response = await axios.post(`${FACE_SERVICE_URL}/verify-face`, formData, {
       headers: formData.getHeaders(),
       timeout: 10000,
     });
@@ -52,17 +46,12 @@ const verifyFace = async (userId, imageBuffer) => {
   }
 };
 
-/**
- * Identify face (find matching user)
- * @param {Buffer} imageBuffer - Face image buffer
- * @returns {Promise<object>} Identification result
- */
 const identifyFace = async (imageBuffer) => {
   try {
     const formData = new FormData();
-    formData.append('image', imageBuffer, { filename: 'face.jpg' });
+    formData.append('file', imageBuffer, { filename: 'face.jpg' });
 
-    const response = await axios.post(`${FACE_SERVICE_URL}/identify`, formData, {
+    const response = await axios.post(`${FACE_SERVICE_URL}/identify-face`, formData, {
       headers: formData.getHeaders(),
       timeout: 10000,
     });
@@ -74,19 +63,13 @@ const identifyFace = async (imageBuffer) => {
   }
 };
 
-/**
- * Register voice with Python voice recognition service
- * @param {string} userId - User ID
- * @param {Buffer} audioBuffer - Voice audio buffer
- * @returns {Promise<object>} Voice embedding data
- */
 const registerVoice = async (userId, audioBuffer) => {
   try {
     const formData = new FormData();
     formData.append('user_id', userId);
-    formData.append('audio', audioBuffer, { filename: 'voice.wav' });
+    formData.append('file', audioBuffer, { filename: 'voice.wav' });
 
-    const response = await axios.post(`${VOICE_SERVICE_URL}/register`, formData, {
+    const response = await axios.post(`${VOICE_SERVICE_URL}/register-voice`, formData, {
       headers: formData.getHeaders(),
       timeout: 15000,
     });
@@ -98,21 +81,18 @@ const registerVoice = async (userId, audioBuffer) => {
   }
 };
 
-/**
- * Verify voice with Python voice recognition service
- * @param {string} userId - User ID
- * @param {Buffer} audioBuffer - Voice audio buffer
- * @returns {Promise<object>} Verification result
- */
-const verifyVoice = async (userId, audioBuffer) => {
+const verifyVoice = async (userId, audioBuffer, expectedText = null) => {
   try {
     const formData = new FormData();
     formData.append('user_id', userId);
-    formData.append('audio', audioBuffer, { filename: 'voice.wav' });
+    formData.append('file', audioBuffer, { filename: 'voice.wav' });
+    if (expectedText) {
+      formData.append('expected_text', expectedText);
+    }
 
-    const response = await axios.post(`${VOICE_SERVICE_URL}/verify`, formData, {
+    const response = await axios.post(`${VOICE_SERVICE_URL}/verify-voice`, formData, {
       headers: formData.getHeaders(),
-      timeout: 15000,
+      timeout: 20000, // Potential STT delay
     });
 
     return response.data;
@@ -122,8 +102,30 @@ const verifyVoice = async (userId, audioBuffer) => {
   }
 };
 
+const batchRegisterFace = async (userId, imageBuffers) => {
+  try {
+    const formData = new FormData();
+    formData.append('user_id', userId);
+
+    imageBuffers.forEach((buffer, index) => {
+      formData.append('files', buffer, { filename: `face_${index}.jpg` });
+    });
+
+    const response = await axios.post(`${FACE_SERVICE_URL}/batch-register-face`, formData, {
+      headers: formData.getHeaders(),
+      timeout: 30000, // Longer timeout for multiple images
+    });
+
+    return response.data;
+  } catch (error) {
+    console.error('Batch face registration error:', error.message);
+    throw new Error('Failed to register face samples');
+  }
+};
+
 module.exports = {
   registerFace,
+  batchRegisterFace,
   verifyFace,
   identifyFace,
   registerVoice,

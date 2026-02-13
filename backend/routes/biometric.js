@@ -8,14 +8,23 @@ const {
   verifyUserFace,
   registerUserVoice,
   verifyUserVoice,
+  getVoiceSentence,
 } = require('../controllers/biometricController');
+
+// Voice routes
+router.get('/voice/sentence', getVoiceSentence);
 
 // All routes require authentication
 router.use(authenticate);
 
 // Face routes
 router.post('/face/register', [
-  body('faceImage').notEmpty().withMessage('Face image is required'),
+  body().custom((value, { req }) => {
+    if (!req.body.faceImage && (!req.body.faceImages || req.body.faceImages.length === 0)) {
+      throw new Error('At least one face image is required');
+    }
+    return true;
+  }),
 ], validate, registerUserFace);
 
 router.post('/face/verify', [
