@@ -147,6 +147,93 @@ async def register_face(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
+@app.post("/batch-register-face")
+async def batch_register_face(
+    user_id: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    """
+    Register multiple face samples (different angles) for better accuracy
+    """
+    try:
+        if not files or len(files) < 2:
+            raise HTTPException(status_code=400, detail="Minimum 2 face samples required for batch registration")
+
+        all_encodings = []
+        primary_image_url = None
+
+        for idx, file in enumerate(files):
+            # Read image
+            image_data = await file.read()
+            image = Image.open(io.BytesIO(image_data))
+            
+            # Convert to RGB if needed
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            image_array = np.array(image)
+            
+            # Perform liveness detection on the first image only
+            if idx == 0:
+                liveness_valid, confidence, reason = perform_liveness_detection(image_array)
+                if not liveness_valid:
+                    raise HTTPException(status_code=400, detail=f"Liveness check failed: {reason}")
+            
+            # Detect faces
+            face_locations = face_recognition.face_locations(image_array, model="hog")
+            
+            if len(face_locations) == 0:
+                continue # Skip images with no face detected
+            
+            # Generate encoding
+            face_encodings = face_recognition.face_encodings(image_array, face_locations)
+            if face_encodings:
+                all_encodings.append(face_encodings[0])
+            
+            # Upload the first (front) image as the display profile
+            if idx == 0:
+                upload_result = cloudinary.uploader.upload(
+                    image_data,
+                    folder="attendance/faces",
+                    public_id=f"user_{user_id}_profile",
+                    transformation=[
+                        {'width': 400, 'height': 400, 'crop': 'fill', 'gravity': 'face'},
+                        {'quality': 'auto:good'}
+                    ]
+                )
+                primary_image_url = upload_result['secure_url']
+
+        if not all_encodings:
+            raise HTTPException(status_code=400, detail="Could not detect face in any of the provided samples")
+
+        # Average all encodings for higher robustness
+        mean_encoding = np.mean(all_encodings, axis=0)
+        encoding_bytes = mean_encoding.tobytes()
+
+        # Update MongoDB
+        await db.users.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$set": {
+                    "faceEncoding": encoding_bytes,
+                    "faceImageUrl": primary_image_url,
+                    "faceRegisteredAt": time.time(),
+                    "encodingSampleCount": len(all_encodings)
+                }
+            }
+        )
+
+        return {
+            "success": True,
+            "message": f"Successfully registered face with {len(all_encodings)} samples",
+            "imageUrl": primary_image_url,
+            "samplesProcessed": len(all_encodings)
+        }
+
+    except Exception as e:
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==================== FACE VERIFICATION ====================
 
 @app.post("/verify-face")

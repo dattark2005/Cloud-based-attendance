@@ -8,7 +8,14 @@ const {
   markAttendance,
   getAttendanceHistory,
   getAttendanceStatus,
+  logActivity,
 } = require('../controllers/attendanceController');
+
+// Activity logging (Entry/Exit)
+router.post('/activity', [
+  body('userId').notEmpty().withMessage('User ID is required'),
+  body('lectureId').notEmpty().withMessage('Lecture ID is required'),
+], validate, logActivity);
 
 // All routes require authentication
 router.use(authenticate);

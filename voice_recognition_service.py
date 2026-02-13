@@ -16,7 +16,8 @@ import os
 import time
 from pydub import AudioSegment
 from sklearn.metrics.pairwise import cosine_similarity
-from typing import List
+from typing import List, Optional
+import speech_recognition as sr
 
 app = FastAPI(title="Voice Recognition Service")
 
@@ -182,22 +183,53 @@ async def register_voice(
 @app.post("/verify-voice")
 async def verify_voice(
     user_id: str = Form(...),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    expected_text: Optional[str] = Form(None)
 ):
     """
-    Verify if uploaded voice matches registered voice
+    Verify if uploaded voice matches registered voice AND optionally matches expected text
     """
     try:
         # Read audio file
         audio_bytes = await file.read()
         
-        # Liveness detection
+        # 0. Speech-to-Text (STT) Check for dynamic sentence verification
+        recognized_text = ""
+        text_match = True
+        if expected_text:
+            recognizer = sr.Recognizer()
+            # Convert bytes to AudioFile
+            audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            wav_io = io.BytesIO()
+            audio_segment.export(wav_io, format="wav")
+            wav_io.seek(0)
+            
+            with sr.AudioFile(wav_io) as source:
+                audio_data = recognizer.record(source)
+                try:
+                    recognized_text = recognizer.recognize_google(audio_data)
+                    # Check if expected text is in recognized text (case insensitive)
+                    text_match = expected_text.lower() in recognized_text.lower()
+                except Exception as stt_error:
+                    print(f"STT Error: {stt_error}")
+                    text_match = False
+                    recognized_text = "[Error recognizing speech]"
+
+        # 1. Liveness detection
         is_live, liveness_confidence, reason = detect_voice_liveness(audio_bytes)
         if not is_live:
             return {
                 "verified": False,
                 "confidence": 0,
                 "reason": f"Voice liveness check failed: {reason}"
+            }
+        
+        if expected_text and not text_match:
+            return {
+                "verified": False,
+                "confidence": 0,
+                "reason": f"Sentence mismatch. Expected: '{expected_text}', heard: '{recognized_text}'",
+                "recognizedText": recognized_text
             }
         
         # Get user's stored embedding
@@ -342,4 +374,4 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

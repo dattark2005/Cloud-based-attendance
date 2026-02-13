@@ -4,13 +4,13 @@ const connectDB = async () => {
   try {
     // If MONGODB_URI is not set or is the default placeholder, use a fallback
     let mongoURI = process.env.MONGODB_URI;
-    
+
     // Check if it's the placeholder value
     if (!mongoURI || mongoURI.includes('username:password@cluster.mongodb.net')) {
       console.log('⚠️  MongoDB URI not configured. Using in-memory fallback.');
       console.log('📝 To use a real database, update MONGODB_URI in .env file');
       console.log('📚 See SETUP_CREDENTIALS.md for instructions\n');
-      
+
       // For development, we can skip MongoDB connection
       // This allows the server to start without a database
       console.log('✅ Server starting in development mode (no database)');
@@ -18,13 +18,10 @@ const connectDB = async () => {
       return;
     }
 
-    const conn = await mongoose.connect(mongoURI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    const conn = await mongoose.connect(mongoURI);
 
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
-    
+
     // Handle connection events
     mongoose.connection.on('error', (err) => {
       console.error('❌ MongoDB connection error:', err);

@@ -36,7 +36,6 @@ const departmentSchema = new mongoose.Schema({
 });
 
 // Indexes
-departmentSchema.index({ code: 1 });
 departmentSchema.index({ name: 1 });
 
 // Virtual for courses

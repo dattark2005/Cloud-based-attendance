@@ -22,6 +22,16 @@ const userSchema = new mongoose.Schema({
     required: [true, 'Full name is required'],
     trim: true,
   },
+  prn: {
+    type: String,
+    required: function () { return this.role === ROLES.STUDENT; },
+    unique: true,
+    sparse: true,
+  },
+  rollNumber: {
+    type: String,
+    required: function () { return this.role === ROLES.STUDENT; },
+  },
   role: {
     type: String,
     enum: Object.values(ROLES),
@@ -31,10 +41,14 @@ const userSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Department',
   },
-  studentId: {
+  // Entry/Exit Status
+  currentStatus: {
     type: String,
-    sparse: true, // Allows null values but ensures uniqueness when present
-    unique: true,
+    enum: ['IN', 'OUT'],
+    default: 'OUT',
+  },
+  lastStatusChange: {
+    type: Date,
   },
   // Face Recognition Data
   faceEncoding: {
@@ -84,15 +98,14 @@ const userSchema = new mongoose.Schema({
 });
 
 // Indexes
-userSchema.index({ email: 1 });
-userSchema.index({ studentId: 1 });
+userSchema.index({ prn: 1 });
 userSchema.index({ role: 1 });
 userSchema.index({ department: 1 });
 
 // Hash password before saving
-userSchema.pre('save', async function(next) {
+userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
-  
+
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
@@ -103,9 +116,19 @@ userSchema.pre('save', async function(next) {
 });
 
 // Method to compare password
-userSchema.methods.comparePassword = async function(candidatePassword) {
+userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
+
+// Virtual for face registration status
+userSchema.virtual('faceRegistered').get(function () {
+  return !!this.faceEncoding;
+});
+
+// Virtual for voice registration status
+userSchema.virtual('voiceRegistered').get(function () {
+  return !!this.voiceEmbedding;
+});
 
 // Virtual for sections (if student)
 userSchema.virtual('sections', {
@@ -122,7 +145,7 @@ userSchema.virtual('teachingSections', {
 });
 
 // Remove sensitive data from JSON output
-userSchema.methods.toJSON = function() {
+userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
   delete obj.faceEncoding;
