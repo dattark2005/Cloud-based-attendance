@@ -55,6 +55,13 @@ const sectionSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
   }],
+  joinCode: {
+    type: String,
+    unique: true,
+    sparse: true,
+    uppercase: true,
+    trim: true,
+  },
   isActive: {
     type: Boolean,
     default: true,
@@ -69,13 +76,28 @@ const sectionSchema = new mongoose.Schema({
   toObject: { virtuals: true },
 });
 
+// Generate unique join code before validation
+sectionSchema.pre('validate', async function (next) {
+  if (this.isNew && !this.joinCode) {
+    let code;
+    let isUnique = false;
+    while (!isUnique) {
+      code = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const existing = await mongoose.model('Section').findOne({ joinCode: code });
+      if (!existing) isUnique = true;
+    }
+    this.joinCode = code;
+  }
+  next();
+});
+
 // Indexes
 sectionSchema.index({ courseId: 1, sectionName: 1, academicYear: 1, semester: 1 }, { unique: true });
 sectionSchema.index({ teacherId: 1 });
 sectionSchema.index({ students: 1 });
 
 // Virtual for enrollment count
-sectionSchema.virtual('enrollmentCount').get(function() {
+sectionSchema.virtual('enrollmentCount').get(function () {
   return this.students ? this.students.length : 0;
 });
 
@@ -87,12 +109,12 @@ sectionSchema.virtual('lectures', {
 });
 
 // Method to check if section is full
-sectionSchema.methods.isFull = function() {
+sectionSchema.methods.isFull = function () {
   return this.students.length >= this.maxCapacity;
 };
 
 // Method to enroll student
-sectionSchema.methods.enrollStudent = function(studentId) {
+sectionSchema.methods.enrollStudent = function (studentId) {
   if (this.isFull()) {
     throw new Error('Section is full');
   }

@@ -9,7 +9,7 @@ const authenticate = async (req, res, next) => {
   try {
     // Get token from header
     const authHeader = req.headers.authorization;
-    
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({
         success: false,
@@ -24,7 +24,7 @@ const authenticate = async (req, res, next) => {
 
     // Get user from database
     const user = await User.findById(decoded.userId).select('-password');
-    
+
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -92,6 +92,7 @@ const isStudent = authorize(ROLES.STUDENT);
 
 module.exports = {
   authenticate,
+  protect: authenticate,
   authorize,
   isAdmin,
   isTeacher,

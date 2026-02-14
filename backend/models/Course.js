@@ -16,7 +16,7 @@ const courseSchema = new mongoose.Schema({
   departmentId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Department',
-    required: [true, 'Department is required'],
+    required: false, // Changed from true to false to allow creation without department
   },
   credits: {
     type: Number,

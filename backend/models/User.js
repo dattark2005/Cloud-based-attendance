@@ -122,12 +122,12 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 
 // Virtual for face registration status
 userSchema.virtual('faceRegistered').get(function () {
-  return !!this.faceEncoding;
+  return !!this.faceRegisteredAt;
 });
 
 // Virtual for voice registration status
 userSchema.virtual('voiceRegistered').get(function () {
-  return !!this.voiceEmbedding;
+  return !!this.voiceRegisteredAt;
 });
 
 // Virtual for sections (if student)
