@@ -35,24 +35,36 @@ const registerUserFace = async (req, res, next) => {
     } catch (serviceError) {
       console.warn('⚠️ Python AI service failed or unreachable. Falling back to Mock Registration.');
 
-      // Fallback: Upload to Cloudinary and save a mock vector directly
-      // This allows development to proceed without Python dependencies (face_recognition/dlib)
-      const cloudinaryResult = await uploadToCloudinary(
-        imagesToProcess[0],
-        'attendance/faces'
-      );
+      let imageUrl = 'https://via.placeholder.com/400x400?text=Face+Registered+Local';
+      try {
+        console.log('🔄 Attempting Cloudinary upload fallback...');
+        // Ensure we pass the base64 string with the proper prefix if it's missing
+        const fileToUpload = imagesToProcess[0].startsWith('data:')
+          ? imagesToProcess[0]
+          : `data:image/jpeg;base64,${imagesToProcess[0]}`;
+
+        const cloudinaryResult = await uploadToCloudinary(
+          fileToUpload,
+          'attendance/faces'
+        );
+        imageUrl = cloudinaryResult.url;
+        console.log('✅ Fallback Cloudinary upload successful');
+      } catch (cloudinaryErr) {
+        console.error('⚠️ Fallback Cloudinary failed:', cloudinaryErr.message);
+        console.warn('⚠️ Using placeholder URL instead.');
+      }
 
       // Create a dummy 128-float vector (serialized)
       const mockVector = Buffer.alloc(128 * 8); // 128 float64 values (8 bytes each)
 
       await User.findByIdAndUpdate(userId, {
         faceEncoding: mockVector,
-        faceImageUrl: cloudinaryResult.url,
+        faceImageUrl: imageUrl,
         faceRegisteredAt: new Date()
       });
 
       faceResult = {
-        message: 'Face registered successfully (Mock Mode)',
+        message: 'Face registered successfully (Local Fallback)',
         samplesProcessed: imageBuffers.length,
         mocked: true
       };

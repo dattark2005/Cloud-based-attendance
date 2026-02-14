@@ -280,10 +280,16 @@ const getAttendanceStatus = async (req, res, next) => {
     const lecture = await Lecture.findById(lectureId)
       .populate({
         path: 'sectionId',
-        populate: {
-          path: 'students',
-          select: 'fullName email studentId',
-        },
+        populate: [
+          {
+            path: 'students',
+            select: 'fullName email studentId faceImageUrl',
+          },
+          {
+            path: 'courseId',
+            select: 'courseName courseCode'
+          }
+        ]
       });
 
     if (!lecture) {
@@ -299,7 +305,7 @@ const getAttendanceStatus = async (req, res, next) => {
 
     // Get attendance records
     const attendanceRecords = await AttendanceRecord.find({ lectureId })
-      .populate('studentId', 'fullName email studentId');
+      .populate('studentId', 'fullName email studentId faceImageUrl');
 
     // Calculate statistics
     const totalStudents = lecture.sectionId.students.length;
@@ -393,7 +399,7 @@ const logActivity = async (req, res, next) => {
         status: ATTENDANCE_STATUS.PRESENT,
         lastEntryTime: new Date(),
         entryExitCount: 1,
-        verificationMethod: 'FACE'
+        verificationMethod: confidence ? 'FACE' : 'MANUAL'
       });
     } else if (attendanceRecord) {
       if (eventType === 'ENTRY') {

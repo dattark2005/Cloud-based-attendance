@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
 const cors = require('cors');
 const morgan = require('morgan');
 const helmet = require('helmet');
@@ -13,6 +14,8 @@ const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 const attendanceRoutes = require('./routes/attendance');
 const biometricRoutes = require('./routes/biometric');
+const sectionRoutes = require('./routes/section');
+const { initSocket } = require('./utils/socket');
 
 // Initialize express app
 const app = express();
@@ -70,6 +73,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/biometric', biometricRoutes);
+app.use('/api/sections', sectionRoutes);
 
 // Root route
 app.get('/', (req, res) => {
@@ -83,6 +87,8 @@ app.get('/', (req, res) => {
       admin: '/api/admin',
       attendance: '/api/attendance',
       biometric: '/api/biometric',
+      sections: '/api/sections',
+      socket: 'ws://localhost:${PORT}',
     },
   });
 });
@@ -98,8 +104,12 @@ app.use(errorHandler);
 // ==================== START SERVER ====================
 
 const PORT = process.env.PORT || 3001;
+const httpServer = http.createServer(app);
 
-const server = app.listen(PORT, () => {
+// Initialize Socket.io
+initSocket(httpServer);
+
+httpServer.listen(PORT, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
@@ -124,7 +134,7 @@ const server = app.listen(PORT, () => {
 process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Promise Rejection:', err);
   // Close server & exit process
-  server.close(() => process.exit(1));
+  httpServer.close(() => process.exit(1));
 });
 
 // Handle uncaught exceptions
