@@ -18,13 +18,19 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const refreshSessions = async () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    if (!token) {
+      setLoading(false);
+      return;
+    }
     try {
       const res = await fetchWithAuth('/sections/active');
       if (res.success) {
         setActiveSessions(res.data.sessions);
       }
     } catch (err) {
-      console.error('Failed to fetch active sessions:', err);
+      // Silently handle auth errors (e.g., expired token)
+      console.warn('Failed to fetch active sessions:', err);
     } finally {
       setLoading(false);
     }

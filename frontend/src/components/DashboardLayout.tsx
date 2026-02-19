@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { LogOut, Bell, Menu, X, ShieldCheck, LayoutDashboard, Clock, Users } from 'lucide-react';
+import { LogOut, Bell, Menu, X, ShieldCheck, LayoutDashboard, Clock, Users, UserCircle } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { fetchWithAuth } from '@/lib/api';
 
@@ -48,6 +48,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     { icon: <LayoutDashboard />, label: 'Overview', href: '/teacher/dashboard' },
     { icon: <Clock />, label: 'Live Attendance', href: '/teacher/attendance' },
     { icon: <Users />, label: 'Student Logs', href: '/teacher/logs' },
+    { icon: <UserCircle />, label: 'Profile & Settings', href: '/teacher/profile' },
   ] : [
     { icon: <LayoutDashboard />, label: 'My Stats', href: '/student/dashboard' },
     { icon: <Clock />, label: 'Attendance History', href: '/student/history' },
@@ -56,7 +57,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <div className="min-h-screen bg-background flex overflow-hidden">
       {/* Sidebar */}
-      <motion.aside 
+      <motion.aside
         initial={false}
         animate={{ width: isSidebarOpen ? 280 : 80 }}
         className="glass-card border-r border-white/5 h-screen sticky top-0 z-50 flex flex-col pt-8"
@@ -75,9 +76,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <button
               key={idx}
               onClick={() => router.push(item.href)}
-              className={`w-full flex items-center p-3 rounded-xl transition-all ${
-                pathname === item.href ? 'bg-primary text-white' : 'text-white/40 hover:bg-white/5'
-              }`}
+              className={`w-full flex items-center p-3 rounded-xl transition-all ${pathname === item.href ? 'bg-primary text-white' : 'text-white/40 hover:bg-white/5'
+                }`}
             >
               <span className="shrink-0">{item.icon}</span>
               {isSidebarOpen && <span className="ml-4 font-medium">{item.label}</span>}
@@ -86,7 +86,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </nav>
 
         <div className="p-4 border-t border-white/5">
-          <button 
+          <button
             onClick={handleLogout}
             className="w-full flex items-center p-3 rounded-xl text-accent hover:bg-accent/10 transition-all"
           >

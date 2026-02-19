@@ -15,6 +15,7 @@ const adminRoutes = require('./routes/admin');
 const attendanceRoutes = require('./routes/attendance');
 const biometricRoutes = require('./routes/biometric');
 const sectionRoutes = require('./routes/section');
+const teacherAttendanceRoutes = require('./routes/teacherAttendance');
 const { initSocket } = require('./utils/socket');
 
 // Initialize express app
@@ -74,6 +75,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/biometric', biometricRoutes);
 app.use('/api/sections', sectionRoutes);
+app.use('/api/teacher-attendance', teacherAttendanceRoutes);
 
 // Root route
 app.get('/', (req, res) => {
