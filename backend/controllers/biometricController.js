@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const { uploadToCloudinary } = require('../config/cloudinary');
 const { registerFace, batchRegisterFace, verifyFace, registerVoice, verifyVoice } = require('../utils/apiClient');
+const { ROLES } = require('../config/constants');
 
 /**
  * Register face for user (Support multiple angles)

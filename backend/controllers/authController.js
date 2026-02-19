@@ -220,11 +220,41 @@ const proxyImage = async (req, res, next) => {
   }
 };
 
+/**
+ * Update current user profile (name, department)
+ * PATCH /api/auth/profile
+ */
+const updateProfile = async (req, res, next) => {
+  try {
+    const { fullName, department } = req.body;
+    const updates = {};
+    if (fullName) updates.fullName = fullName.trim();
+    if (department !== undefined) updates.department = department;
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      updates,
+      { new: true, runValidators: true }
+    )
+      .populate('department', 'name code')
+      .select('-faceEncoding -voiceEmbedding -password');
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: { user },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   register,
   login,
   getMe,
   logout,
   refreshToken,
-  proxyImage
+  proxyImage,
+  updateProfile,
 };

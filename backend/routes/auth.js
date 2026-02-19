@@ -8,7 +8,8 @@ const {
   getMe,
   logout,
   refreshToken,
-  proxyImage
+  proxyImage,
+  updateProfile,
 } = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 
@@ -32,5 +33,7 @@ router.get('/me', authenticate, getMe);
 router.post('/logout', authenticate, logout);
 router.post('/refresh', refreshToken);
 router.get('/proxy-image', proxyImage);
+router.patch('/profile', authenticate, updateProfile);
 
 module.exports = router;
+
