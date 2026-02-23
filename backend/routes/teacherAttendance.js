@@ -8,6 +8,7 @@ const {
     getTodayStatus,
     markAttendance,
     getMyAttendance,
+    registerTeacherFace,
 } = require('../controllers/teacherAttendanceController');
 
 // All routes require authentication and TEACHER or ADMIN role
@@ -19,6 +20,10 @@ router.get('/status', getTodayStatus);
 
 // GET /api/teacher-attendance/my
 router.get('/my', getMyAttendance);
+
+// POST /api/teacher-attendance/register-face
+// Registers the teacher's face (delegates to biometricController.registerUserFace)
+router.post('/register-face', registerTeacherFace);
 
 // POST /api/teacher-attendance/mark
 router.post(
