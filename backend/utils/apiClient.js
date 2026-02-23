@@ -29,26 +29,16 @@ const registerFace = async (userId, imageBuffer) => {
 };
 
 const verifyFace = async (userId, imageBuffer) => {
-  try {
-    const formData = new FormData();
-    formData.append('user_id', userId);
-    formData.append('file', imageBuffer, { filename: 'face.jpg' });
+  const formData = new FormData();
+  formData.append('user_id', userId);
+  formData.append('file', imageBuffer, { filename: 'face.jpg' });
 
-    const response = await axios.post(`${FACE_SERVICE_URL}/verify-face`, formData, {
-      headers: formData.getHeaders(),
-      timeout: 10000,
-    });
+  const response = await axios.post(`${FACE_SERVICE_URL}/verify-face`, formData, {
+    headers: formData.getHeaders(),
+    timeout: 10000,
+  });
 
-    return response.data;
-  } catch (error) {
-    // Fallback for development if Python service is not running
-    if (error.code === 'ECONNREFUSED' || error.message.includes('timeout')) {
-      console.warn('Face Service Unavailable - Returning Mock Success');
-      return { verified: true, confidence: 0.95 };
-    }
-    console.error('Face verification error:', error.message);
-    throw new Error('Failed to verify face');
-  }
+  return response.data;
 };
 
 const identifyFace = async (imageBuffer) => {

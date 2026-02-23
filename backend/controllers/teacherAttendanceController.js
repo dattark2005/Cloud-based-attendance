@@ -1,9 +1,11 @@
 const TeacherAttendance = require('../models/TeacherAttendance');
 const User = require('../models/User');
 const { verifyFace } = require('../utils/apiClient');
+const { registerUserFace } = require('./biometricController');
+const { compareFaceImages } = require('../utils/faceComparison');
 
 /**
- * Get today's date string in YYYY-MM-DD (local-ish, using UTC date)
+ * Get today's date string in YYYY-MM-DD
  */
 function getTodayDateString() {
     const now = new Date();
@@ -30,6 +32,7 @@ const getTodayStatus = async (req, res, next) => {
                 marked: !!record,
                 record: record || null,
                 faceRegistered: !!req.user.faceRegisteredAt,
+                voiceRegistered: !!req.user.voiceRegisteredAt,
             },
         });
     } catch (error) {
@@ -67,8 +70,8 @@ const markAttendance = async (req, res, next) => {
         }
 
         // Check if teacher has a registered face
-        const teacher = await User.findById(teacherId);
-        if (!teacher || !teacher.faceEncoding) {
+        const teacher = await User.findById(teacherId).select('+faceEncoding +faceImageData');
+        if (!teacher || (!teacher.faceEncoding && !teacher.faceImageData)) {
             return res.status(400).json({
                 success: false,
                 message: 'Face not registered. Please register your face first.',
@@ -92,17 +95,34 @@ const markAttendance = async (req, res, next) => {
             if (!verified) {
                 return res.status(401).json({
                     success: false,
-                    message: 'Face verification failed. Please try again.',
-                    data: { confidence: confidenceScore },
+                    message: '❌ Invalid face – face not recognised. Please try again.',
+                    data: { confidence: confidenceScore, verified: false },
                 });
             }
         } catch (serviceError) {
-            // Python service unavailable — use mock verification fallback
-            console.warn(
-                '⚠️  Face service unavailable. Using mock verification for teacher attendance.'
-            );
-            verified = true;
-            confidenceScore = 0.95; // Mock high confidence
+            // Python service unavailable — use local image comparison
+            console.warn('⚠️  Python face service unavailable. Using local comparison for teacher attendance.');
+
+            if (!teacher.faceImageData || teacher.faceImageData.length === 0) {
+                // No local reference image — cannot verify safely
+                return res.status(503).json({
+                    success: false,
+                    message: 'Face recognition service is unavailable. Please try again later.',
+                    data: { verified: false },
+                });
+            }
+
+            const result = compareFaceImages(teacher.faceImageData, imageBuffer);
+            verified = result.matched;
+            confidenceScore = result.confidence;
+
+            if (!verified) {
+                return res.status(401).json({
+                    success: false,
+                    message: '❌ Invalid face – face not recognised. Please try again.',
+                    data: { confidence: confidenceScore, verified: false, method: 'local_comparison' },
+                });
+            }
         }
 
         // Create attendance record
@@ -117,7 +137,7 @@ const markAttendance = async (req, res, next) => {
 
         res.json({
             success: true,
-            message: 'Attendance marked successfully!',
+            message: '✅ Attendance marked successfully!',
             data: { record, confidence: confidenceScore },
         });
     } catch (error) {
@@ -149,7 +169,6 @@ const getMyAttendance = async (req, res, next) => {
             .sort({ date: -1 })
             .limit(30);
 
-        // Count statistics
         const presentCount = records.filter((r) => r.status === 'PRESENT').length;
 
         res.json({
@@ -171,4 +190,6 @@ module.exports = {
     getTodayStatus,
     markAttendance,
     getMyAttendance,
+    // Re-export face registration so the route can use it
+    registerTeacherFace: registerUserFace,
 };

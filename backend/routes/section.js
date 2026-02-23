@@ -4,7 +4,11 @@ const {
     createClassroom,
     joinClassroom,
     getTeacherClassrooms,
-    getStudentClassrooms
+    getStudentClassrooms,
+    getClassroomDetail,
+    getClassroomLectures,
+    scheduleLecture,
+    cancelLecture,
 } = require('../controllers/sectionController');
 const {
     startSession,
@@ -31,5 +35,13 @@ router.get('/teacher', authorize(ROLES.TEACHER, ROLES.ADMIN), getTeacherClassroo
 // Student specific routes
 router.post('/join', authorize(ROLES.STUDENT), joinClassroom);
 router.get('/student', authorize(ROLES.STUDENT), getStudentClassrooms);
+
+// Classroom Detail (teacher or enrolled student)
+router.get('/:sectionId', getClassroomDetail);
+
+// Lecture Scheduling — teacher only
+router.get('/:sectionId/lectures', getClassroomLectures);
+router.post('/:sectionId/lectures', authorize(ROLES.TEACHER, ROLES.ADMIN), scheduleLecture);
+router.delete('/:sectionId/lectures/:lectureId', authorize(ROLES.TEACHER, ROLES.ADMIN), cancelLecture);
 
 module.exports = router;
