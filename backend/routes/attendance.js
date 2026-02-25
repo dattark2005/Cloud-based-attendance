@@ -29,7 +29,7 @@ router.post('/request', isTeacher, [
 // Mark attendance (students only)
 router.post('/mark', isStudent, [
   body('lectureId').notEmpty().withMessage('Lecture ID is required'),
-  body('faceImage').notEmpty().withMessage('Face image is required'),
+  body('faceImage').optional(),
 ], validate, markAttendance);
 
 // Get attendance history (all authenticated users)

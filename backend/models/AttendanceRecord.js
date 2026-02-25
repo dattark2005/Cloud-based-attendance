@@ -61,6 +61,14 @@ const attendanceRecordSchema = new mongoose.Schema({
     type: String,
     trim: true,
   },
+  // GPS verification details (populated when verificationMethod === 'GPS')
+  gpsVerification: {
+    lat: Number,
+    lng: Number,
+    accuracy: Number,           // declared browser accuracy in metres
+    distanceFromClassroom: Number, // computed by Haversine
+    photoUrl: String,           // live photo URL (Cloudinary)
+  },
 }, {
   timestamps: true,
 });

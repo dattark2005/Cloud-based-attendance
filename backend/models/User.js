@@ -98,7 +98,6 @@ const userSchema = new mongoose.Schema({
 });
 
 // Indexes
-userSchema.index({ prn: 1 });
 userSchema.index({ role: 1 });
 userSchema.index({ department: 1 });
 

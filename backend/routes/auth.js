@@ -10,6 +10,7 @@ const {
   refreshToken,
   proxyImage,
   updateProfile,
+  changePassword,
 } = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 
@@ -34,6 +35,7 @@ router.post('/logout', authenticate, logout);
 router.post('/refresh', refreshToken);
 router.get('/proxy-image', proxyImage);
 router.patch('/profile', authenticate, updateProfile);
+router.post('/change-password', authenticate, changePassword);
 
 module.exports = router;
 

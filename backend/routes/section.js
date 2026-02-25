@@ -4,7 +4,8 @@ const {
     createClassroom,
     joinClassroom,
     getTeacherClassrooms,
-    getStudentClassrooms
+    getStudentClassrooms,
+    getSectionLectures
 } = require('../controllers/sectionController');
 const {
     startSession,
@@ -23,6 +24,9 @@ router.get('/active', getActiveSessions);
 router.post('/:sectionId/start-session', authorize(ROLES.TEACHER), startSession);
 router.post('/:sectionId/end-session', authorize(ROLES.TEACHER), endSession);
 router.post('/session/:lectureId/verify', authorize(ROLES.STUDENT), verifySessionFace);
+
+// Get all lectures for a section (teacher or enrolled student)
+router.get('/:sectionId/lectures', getSectionLectures);
 
 // Teacher specific routes
 router.post('/create', authorize(ROLES.TEACHER, ROLES.ADMIN), createClassroom);

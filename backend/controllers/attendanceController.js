@@ -130,12 +130,13 @@ const markAttendance = async (req, res, next) => {
       });
     }
 
-    // Verify face with Python service
-    let faceVerificationResult;
+    // Verify face with Python service (optional if no image provided)
     let faceImageUrl;
     let confidenceScore = 0;
+    let verificationMethod = 'MANUAL';
 
     if (faceImage) {
+      verificationMethod = 'FACE';
       try {
         // Upload face image to Cloudinary
         const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
@@ -147,7 +148,7 @@ const markAttendance = async (req, res, next) => {
         faceImageUrl = cloudinaryResult.url;
 
         // Verify face
-        faceVerificationResult = await verifyFace(studentId.toString(), imageBuffer);
+        const faceVerificationResult = await verifyFace(studentId.toString(), imageBuffer);
         confidenceScore = faceVerificationResult.confidence || 0;
 
         if (!faceVerificationResult.verified || confidenceScore < DEFAULTS.MIN_CONFIDENCE_SCORE) {
@@ -182,6 +183,7 @@ const markAttendance = async (req, res, next) => {
       status,
       confidenceScore,
       faceImageUrl,
+      verificationMethod,
       location,
       deviceInfo: {
         userAgent: req.headers['user-agent'],
@@ -201,6 +203,7 @@ const markAttendance = async (req, res, next) => {
           status: attendanceRecord.status,
           markedAt: attendanceRecord.markedAt,
           confidenceScore: attendanceRecord.confidenceScore,
+          verificationMethod: attendanceRecord.verificationMethod,
         }
       },
     });
@@ -333,10 +336,13 @@ const getAttendanceStatus = async (req, res, next) => {
       success: true,
       data: {
         lecture: {
+          _id: lecture._id,
           id: lecture._id,
           status: lecture.status,
           scheduledStart: lecture.scheduledStart,
           scheduledEnd: lecture.scheduledEnd,
+          // Include populated sectionId so frontend can access sectionId.courseId.courseName
+          sectionId: lecture.sectionId,
         },
         attendanceRequest: attendanceRequest ? {
           status: attendanceRequest.status,

@@ -203,20 +203,42 @@ const proxyImage = async (req, res, next) => {
       return res.status(400).send('URL is required');
     }
 
+    const decodedUrl = decodeURIComponent(url);
+
+    // If URL is a placeholder / mock image, return a transparent 1×1 PNG immediately
+    // so the student face recognition can fail gracefully in the browser
+    const PLACEHOLDER_PATTERNS = ['via.placeholder.com', 'placeholder.com', '?text=', 'placehold'];
+    if (PLACEHOLDER_PATTERNS.some(p => decodedUrl.includes(p))) {
+      // 1×1 transparent PNG (base64)
+      const transparentPng = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        'base64'
+      );
+      res.set('Content-Type', 'image/png');
+      return res.send(transparentPng);
+    }
+
     const response = await axios({
       method: 'get',
-      url: decodeURIComponent(url),
+      url: decodedUrl,
       responseType: 'stream',
+      timeout: 8000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
     });
 
-    res.set('Content-Type', response.headers['content-type']);
+    res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
     response.data.pipe(res);
   } catch (error) {
     console.error('Proxy error:', error.message);
-    res.status(500).send('Failed to fetch image');
+    // Return transparent 1×1 PNG instead of crashing — browser-safe fallback
+    const transparentPng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      'base64'
+    );
+    res.set('Content-Type', 'image/png');
+    res.send(transparentPng);
   }
 };
 
@@ -249,6 +271,56 @@ const updateProfile = async (req, res, next) => {
   }
 };
 
+/**
+ * Change password for logged-in user (teacher or student)
+ * POST /api/auth/change-password
+ */
+const changePassword = async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Both current and new password are required',
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters',
+      });
+    }
+
+    // Load user with password field
+    const user = await User.findById(req.user._id).select('+password');
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // Verify current password
+    const isValid = await user.comparePassword(currentPassword);
+    if (!isValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect',
+      });
+    }
+
+    // Update password — pre-save hook will hash it
+    user.password = newPassword;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -257,4 +329,5 @@ module.exports = {
   refreshToken,
   proxyImage,
   updateProfile,
+  changePassword,
 };

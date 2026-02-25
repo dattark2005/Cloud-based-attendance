@@ -28,6 +28,7 @@ interface UserData {
 
 type ActiveSection = 'profile' | 'face' | 'voice' | 'security';
 
+
 export default function TeacherProfilePage() {
     const [user, setUser] = useState<UserData | null>(null);
     const [loading, setLoading] = useState(true);
@@ -50,6 +51,13 @@ export default function TeacherProfilePage() {
     const [audioDuration, setAudioDuration] = useState(0);
     const [audioUrl, setAudioUrl] = useState<string | null>(null);
     const [registeringVoice, setRegisteringVoice] = useState(false);
+
+    // Password change state
+    const [currentPwd, setCurrentPwd] = useState('');
+    const [newPwd, setNewPwd] = useState('');
+    const [confirmPwd, setConfirmPwd] = useState('');
+    const [changingPwd, setChangingPwd] = useState(false);
+    const [showPwds, setShowPwds] = useState(false);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunks = useRef<Blob[]>([]);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -185,6 +193,27 @@ export default function TeacherProfilePage() {
         }
     };
 
+    const handleChangePassword = async () => {
+        if (!currentPwd || !newPwd || !confirmPwd) { toast.error('All password fields are required'); return; }
+        if (newPwd !== confirmPwd) { toast.error('New passwords do not match'); return; }
+        if (newPwd.length < 6) { toast.error('New password must be at least 6 characters'); return; }
+        setChangingPwd(true);
+        try {
+            const res = await fetchWithAuth('/auth/change-password', {
+                method: 'POST',
+                body: JSON.stringify({ currentPassword: currentPwd, newPassword: newPwd }),
+            });
+            if (res.success) {
+                toast.success('🎉 Password changed successfully!');
+                setCurrentPwd(''); setNewPwd(''); setConfirmPwd('');
+            }
+        } catch (err: unknown) {
+            toast.error(err instanceof Error ? err.message : 'Failed to change password');
+        } finally {
+            setChangingPwd(false);
+        }
+    };
+
     // ── Helpers ──
     const fmtDate = (d?: string) => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : '—';
     const fmtTime = (d?: string) => d ? new Date(d).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
@@ -275,8 +304,8 @@ export default function TeacherProfilePage() {
                                 key={s.id}
                                 onClick={() => setActiveSection(s.id)}
                                 className={`w-full flex items-center gap-3 p-4 rounded-2xl transition-all text-left border ${activeSection === s.id
-                                        ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-300'
-                                        : 'border-transparent hover:bg-white/5 text-white/50 hover:text-white/80'
+                                    ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-300'
+                                    : 'border-transparent hover:bg-white/5 text-white/50 hover:text-white/80'
                                     }`}
                             >
                                 <span className={activeSection === s.id ? 'text-indigo-400' : 'text-white/30'}>{s.icon}</span>
@@ -597,10 +626,69 @@ export default function TeacherProfilePage() {
                                         ))}
                                     </div>
 
-                                    <div className="px-4 py-4 rounded-2xl bg-amber-500/8 border border-amber-500/15 flex items-start gap-3">
-                                        <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
-                                        <p className="text-xs text-white/40 leading-relaxed">
-                                            To change your password, contact your system administrator. Biometric data is encrypted and cannot be viewed, only re-registered.
+                                    {/* ── Change Password ── */}
+                                    <div className="space-y-4 pt-4 border-t border-white/6">
+                                        <div className="flex items-center justify-between">
+                                            <div>
+                                                <p className="text-sm font-bold">Change Password</p>
+                                                <p className="text-xs text-white/30 mt-0.5">Use a strong password of at least 6 characters</p>
+                                            </div>
+                                            <button
+                                                onClick={() => setShowPwds(v => !v)}
+                                                className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors px-3 py-1.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20"
+                                            >
+                                                {showPwds ? 'Cancel' : 'Change Password'}
+                                            </button>
+                                        </div>
+                                        {showPwds && (
+                                            <div className="space-y-3">
+                                                <div>
+                                                    <label className="block text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1.5">Current Password</label>
+                                                    <input
+                                                        type="password"
+                                                        value={currentPwd}
+                                                        onChange={e => setCurrentPwd(e.target.value)}
+                                                        placeholder="Enter current password"
+                                                        className="input-field text-sm"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1.5">New Password</label>
+                                                    <input
+                                                        type="password"
+                                                        value={newPwd}
+                                                        onChange={e => setNewPwd(e.target.value)}
+                                                        placeholder="Min 6 characters"
+                                                        className="input-field text-sm"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1.5">Confirm New Password</label>
+                                                    <input
+                                                        type="password"
+                                                        value={confirmPwd}
+                                                        onChange={e => setConfirmPwd(e.target.value)}
+                                                        placeholder="Repeat new password"
+                                                        className="input-field text-sm"
+                                                    />
+                                                </div>
+                                                <button
+                                                    onClick={handleChangePassword}
+                                                    disabled={changingPwd || !currentPwd || !newPwd || !confirmPwd}
+                                                    className="flex items-center gap-2 btn-primary px-6 py-3 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-bold"
+                                                >
+                                                    {changingPwd
+                                                        ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />Changing…</>
+                                                        : <><Lock className="w-4 h-4" />Update Password</>
+                                                    }
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="px-4 py-3 rounded-2xl bg-white/3 border border-white/8 flex items-start gap-3">
+                                        <AlertTriangle className="w-4 h-4 text-white/20 mt-0.5 shrink-0" />
+                                        <p className="text-xs text-white/30 leading-relaxed">
+                                            Biometric data is encrypted and cannot be viewed — only re-registered from the Face / Voice tabs.
                                         </p>
                                     </div>
                                 </motion.div>
