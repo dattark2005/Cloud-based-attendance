@@ -4,12 +4,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Users, 
-  Clock, 
-  Activity, 
-  ShieldCheck, 
-  CheckCircle2, 
+import {
+  Users,
+  Clock,
+  Activity,
+  ShieldCheck,
+  CheckCircle2,
   UserCheck,
   Camera,
   AlertCircle
@@ -23,7 +23,7 @@ import * as faceapi from 'face-api.js';
 export default function TeacherLiveSession() {
   const { lectureId } = useParams();
   const router = useRouter();
-  
+
   // State
   const [sessionInfo, setSessionInfo] = useState<any>(null);
   const [students, setStudents] = useState<any[]>([]);
@@ -32,7 +32,7 @@ export default function TeacherLiveSession() {
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [faceMatcher, setFaceMatcher] = useState<faceapi.FaceMatcher | null>(null);
   const [isWebcamActive, setIsWebcamActive] = useState(true);
-  
+
   // Refs
   const webcamRef = useRef<Webcam>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -66,19 +66,19 @@ export default function TeacherLiveSession() {
         const res = await fetchWithAuth(`/attendance/status/${lectureId}`);
         if (res.success) {
           setSessionInfo(res.data);
-          // Combine enrolled students with attendance records
-          const allStudents = res.data.lecture.sectionId.students || [];
+          // lecture.sectionId is now populated with courseId and students
+          const allStudents = res.data.lecture?.sectionId?.students || [];
           setStudents(allStudents);
           setStats({
-            present: res.data.stats.present,
+            present: res.data.stats?.present || 0,
             total: allStudents.length
           });
-          
+
           // Initialize detected students from history
-          const initialLogs = res.data.attendanceRecords.map((r: any) => ({
-            studentName: r.studentId.fullName,
+          const initialLogs = (res.data.attendanceRecords || []).map((r: any) => ({
+            studentName: r.studentId?.fullName || 'Unknown',
             timestamp: r.markedAt,
-            confidence: r.confidenceScore
+            confidence: r.confidenceScore || 0
           }));
           setDetectedStudents(initialLogs);
         }
@@ -100,12 +100,12 @@ export default function TeacherLiveSession() {
 
       for (const student of students) {
         if (!student.faceImageUrl) continue;
-        
+
         try {
           // Use fetchImage to handle CORS if needed
           const img = await faceapi.fetchImage(student.faceImageUrl);
           const detections = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
-          
+
           if (detections) {
             labeledDescriptors.push(
               new faceapi.LabeledFaceDescriptors(student._id, [detections.descriptor])
@@ -136,7 +136,7 @@ export default function TeacherLiveSession() {
       if (webcamRef.current && webcamRef.current.video?.readyState === 4 && canvasRef.current) {
         const video = webcamRef.current.video;
         const canvas = canvasRef.current;
-        
+
         // Match canvas size to video
         const displaySize = { width: video.videoWidth, height: video.videoHeight };
         faceapi.matchDimensions(canvas, displaySize);
@@ -145,9 +145,9 @@ export default function TeacherLiveSession() {
         const detections = await faceapi.detectAllFaces(video)
           .withFaceLandmarks()
           .withFaceDescriptors();
-        
+
         const resizedDetections = faceapi.resizeResults(detections, displaySize);
-        
+
         // Clear previous drawings
         const context = canvas.getContext('2d');
         context?.clearRect(0, 0, canvas.width, canvas.height);
@@ -163,7 +163,7 @@ export default function TeacherLiveSession() {
           if (match.label !== 'unknown' && match.distance < 0.5) { // Lower distance = higher similarity
             const studentId = match.label;
             const now = Date.now();
-            
+
             // Debounce: verify only every 10 seconds per student
             if (!lastLoggedTime.current[studentId] || now - lastLoggedTime.current[studentId] > 10000) {
               lastLoggedTime.current[studentId] = now;
@@ -193,10 +193,10 @@ export default function TeacherLiveSession() {
         timestamp: new Date().toISOString(),
         confidence
       }, ...prev].slice(0, 50));
-      
+
       setStats(prev => {
         // Prevent double counting in this session view
-        return { ...prev, present: Math.min(prev.present + 1, prev.total) }; 
+        return { ...prev, present: Math.min(prev.present + 1, prev.total) };
       });
 
       toast.success(`Verified: ${student.fullName}`, { icon: '✅' });
@@ -248,11 +248,11 @@ export default function TeacherLiveSession() {
               <div className="px-3 py-1 bg-rose-500 rounded-full animate-pulse shadow-lg shadow-rose-500/30">
                 <span className="text-[10px] font-black text-white uppercase tracking-widest">Live Surveillance</span>
               </div>
-              <h1 className="text-3xl font-black tracking-tight">{sessionInfo.lecture?.sectionId.courseId?.courseName}</h1>
+              <h1 className="text-3xl font-black tracking-tight">{sessionInfo.lecture?.sectionId?.courseId?.courseName}</h1>
             </div>
-            <p className="text-white/40 text-sm font-medium">Classroom: {sessionInfo.lecture?.sectionId.sectionName}</p>
+            <p className="text-white/40 text-sm font-medium">Classroom: {sessionInfo.lecture?.sectionId?.sectionName}</p>
           </div>
-          <button 
+          <button
             onClick={endSession}
             className="px-8 py-4 bg-white/5 border border-white/10 hover:bg-rose-500 hover:border-rose-500 text-white rounded-[24px] text-xs font-black uppercase tracking-widest transition-all"
           >
@@ -273,11 +273,11 @@ export default function TeacherLiveSession() {
                     className="w-full h-full object-cover"
                     videoConstraints={{ facingMode: "user" }}
                   />
-                  <canvas 
+                  <canvas
                     ref={canvasRef}
                     className="absolute top-0 left-0 w-full h-full z-10"
                   />
-                  
+
                   {/* Overlay UI */}
                   <div className="absolute top-4 left-4 z-20 flex space-x-2">
                     <div className="px-4 py-2 bg-black/50 backdrop-blur-md rounded-full border border-white/10 flex items-center space-x-2">
@@ -285,8 +285,8 @@ export default function TeacherLiveSession() {
                       <span className="text-[10px] font-bold text-white uppercase tracking-widest">CAM 01</span>
                     </div>
                     <div className="px-4 py-2 bg-black/50 backdrop-blur-md rounded-full border border-white/10 flex items-center space-x-2">
-                       <ShieldCheck className="w-4 h-4 text-emerald-500" />
-                       <span className="text-[10px] font-bold text-white uppercase tracking-widest">Active</span>
+                      <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                      <span className="text-[10px] font-bold text-white uppercase tracking-widest">Active</span>
                     </div>
                   </div>
                 </div>
@@ -297,11 +297,11 @@ export default function TeacherLiveSession() {
                 </div>
               )}
             </div>
-            
+
             <div className="glass-card p-8 rounded-[35px] flex items-center justify-between">
               <div className="space-y-1">
-                 <h4 className="font-bold text-lg">Classroom Stats</h4>
-                 <p className="text-xs text-white/40">Real-time occupancy tracking</p>
+                <h4 className="font-bold text-lg">Classroom Stats</h4>
+                <p className="text-xs text-white/40">Real-time occupancy tracking</p>
               </div>
               <div className="flex space-x-12">
                 <div className="text-center">
@@ -313,8 +313,8 @@ export default function TeacherLiveSession() {
                   <p className="text-[10px] font-bold uppercase tracking-widest text-white/20">Absent</p>
                 </div>
                 <div className="text-center">
-                   <p className="text-3xl font-black text-white/20">{stats.total}</p>
-                   <p className="text-[10px] font-bold uppercase tracking-widest text-white/20">Enrolled</p>
+                  <p className="text-3xl font-black text-white/20">{stats.total}</p>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/20">Enrolled</p>
                 </div>
               </div>
             </div>
@@ -327,12 +327,12 @@ export default function TeacherLiveSession() {
                 <Activity className="w-5 h-5 text-primary" />
                 <span>Detection Log</span>
               </h3>
-              
+
               <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
                 <AnimatePresence>
                   {detectedStudents.length > 0 ? (
                     detectedStudents.map((log, i) => (
-                      <motion.div 
+                      <motion.div
                         key={`${log.studentName}-${i}`}
                         initial={{ opacity: 0, x: 20 }}
                         animate={{ opacity: 1, x: 0 }}
@@ -362,7 +362,7 @@ export default function TeacherLiveSession() {
                 </AnimatePresence>
               </div>
             </div>
-            
+
             <div className="glass-card p-6 rounded-[30px] border border-orange-500/20 bg-orange-500/5 flex items-start space-x-4">
               <AlertCircle className="w-6 h-6 text-orange-500 flex-shrink-0" />
               <div>

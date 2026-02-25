@@ -1,4 +1,9 @@
 const mongoose = require('mongoose');
+const dns = require('dns');
+
+// Fix: Node.js on Windows often fails to resolve MongoDB SRV records
+// using the system DNS. Force it to use Google/Cloudflare's public DNS.
+dns.setServers(['8.8.8.8', '1.1.1.1']);
 
 const connectDB = async () => {
   try {

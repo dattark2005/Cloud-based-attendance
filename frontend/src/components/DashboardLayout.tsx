@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { LogOut, Bell, Menu, X, ShieldCheck, LayoutDashboard, Clock, Users, UserCircle } from 'lucide-react';
+import { LogOut, Bell, Menu, X, ShieldCheck, LayoutDashboard, Clock, Users, UserCircle, Navigation } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { fetchWithAuth } from '@/lib/api';
 
@@ -47,11 +47,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const navItems = user?.role === 'TEACHER' ? [
     { icon: <LayoutDashboard />, label: 'Overview', href: '/teacher/dashboard' },
     { icon: <Clock />, label: 'Live Attendance', href: '/teacher/attendance' },
+    { icon: <Navigation />, label: 'GPS Attendance', href: '/teacher/gps-attendance' },
     { icon: <Users />, label: 'Student Logs', href: '/teacher/logs' },
     { icon: <UserCircle />, label: 'Profile & Settings', href: '/teacher/profile' },
   ] : [
     { icon: <LayoutDashboard />, label: 'My Stats', href: '/student/dashboard' },
     { icon: <Clock />, label: 'Attendance History', href: '/student/history' },
+    { icon: <UserCircle />, label: 'Profile & Settings', href: '/student/profile' },
   ];
 
   return (

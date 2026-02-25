@@ -16,6 +16,7 @@ const attendanceRoutes = require('./routes/attendance');
 const biometricRoutes = require('./routes/biometric');
 const sectionRoutes = require('./routes/section');
 const teacherAttendanceRoutes = require('./routes/teacherAttendance');
+const gpsAttendanceRoutes = require('./routes/gpsAttendance');
 const { initSocket } = require('./utils/socket');
 
 // Initialize express app
@@ -76,6 +77,7 @@ app.use('/api/attendance', attendanceRoutes);
 app.use('/api/biometric', biometricRoutes);
 app.use('/api/sections', sectionRoutes);
 app.use('/api/teacher-attendance', teacherAttendanceRoutes);
+app.use('/api/gps-attendance', gpsAttendanceRoutes);
 
 // Root route
 app.get('/', (req, res) => {
@@ -94,6 +96,29 @@ app.get('/', (req, res) => {
     },
   });
 });
+
+// ==================== DEV UTILS (REMOVE IN PRODUCTION) ====================
+if (process.env.NODE_ENV === 'development') {
+  const bcrypt = require('bcryptjs');
+  const User = require('./models/User');
+
+  // GET /dev/users — list all users
+  app.get('/dev/users', async (req, res) => {
+    const users = await User.find({}).select('email fullName role isActive createdAt');
+    res.json({ count: users.length, users });
+  });
+
+  // POST /dev/reset-password — reset a user's password
+  // Body: { "email": "...", "newPassword": "..." }
+  app.post('/dev/reset-password', async (req, res) => {
+    const { email, newPassword } = req.body;
+    const salt = await bcrypt.genSalt(10);
+    const hashed = await bcrypt.hash(newPassword, salt);
+    const user = await User.findOneAndUpdate({ email }, { password: hashed }, { new: true });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    res.json({ success: true, message: `Password reset for ${user.email} (${user.role})` });
+  });
+}
 
 // ==================== ERROR HANDLING ====================
 

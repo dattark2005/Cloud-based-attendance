@@ -35,6 +35,12 @@ const sectionSchema = new mongoose.Schema({
     type: String,
     trim: true,
   },
+  // GPS coordinates for classroom (used for teacher GPS attendance)
+  classroomLocation: {
+    lat: { type: Number, default: null },
+    lng: { type: Number, default: null },
+    radiusMeters: { type: Number, default: 50 }, // max allowed distance from classroom
+  },
   schedule: [{
     dayOfWeek: {
       type: Number,

@@ -58,6 +58,7 @@ module.exports = {
     FACE: 'FACE',
     VOICE: 'VOICE',
     MANUAL: 'MANUAL',
+    GPS: 'GPS',
   },
 
   // Default Values

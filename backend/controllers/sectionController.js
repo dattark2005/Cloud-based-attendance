@@ -1,6 +1,8 @@
 const Section = require('../models/Section');
 const Course = require('../models/Course');
 const User = require('../models/User');
+const Lecture = require('../models/Lecture');
+const AttendanceRecord = require('../models/AttendanceRecord');
 const { ROLES } = require('../config/constants');
 
 /**
@@ -142,9 +144,47 @@ const getStudentClassrooms = async (req, res, next) => {
     }
 };
 
+/**
+ * Get all lectures for a specific section
+ * GET /api/sections/:sectionId/lectures
+ */
+const getSectionLectures = async (req, res, next) => {
+    try {
+        const { sectionId } = req.params;
+
+        // Verify section exists and user has access
+        const section = await Section.findById(sectionId);
+        if (!section) {
+            return res.status(404).json({ success: false, message: 'Section not found' });
+        }
+
+        // Fetch all lectures for the section, newest first
+        const lectures = await Lecture.find({ sectionId })
+            .sort({ scheduledStart: -1 })
+            .lean();
+
+        // Attach attendance count to each lecture
+        const lecturesWithStats = await Promise.all(
+            lectures.map(async (lecture) => {
+                const presentCount = await AttendanceRecord.countDocuments({ lectureId: lecture._id });
+                return { ...lecture, attendanceCount: presentCount };
+            })
+        );
+
+        res.json({
+            success: true,
+            count: lecturesWithStats.length,
+            data: { lectures: lecturesWithStats, section }
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     createClassroom,
     joinClassroom,
     getTeacherClassrooms,
-    getStudentClassrooms
+    getStudentClassrooms,
+    getSectionLectures
 };

@@ -8,6 +8,7 @@ const {
     getTodayStatus,
     markAttendance,
     getMyAttendance,
+    registerFace,
 } = require('../controllers/teacherAttendanceController');
 
 // All routes require authentication and TEACHER or ADMIN role
@@ -26,6 +27,14 @@ router.post(
     [body('faceImage').notEmpty().withMessage('Face image is required')],
     validate,
     markAttendance
+);
+
+// POST /api/teacher-attendance/register-face
+router.post(
+    '/register-face',
+    [body('faceImage').notEmpty().withMessage('Face image is required')],
+    validate,
+    registerFace
 );
 
 module.exports = router;

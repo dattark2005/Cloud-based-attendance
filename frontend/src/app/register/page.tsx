@@ -19,7 +19,7 @@ export default function RegisterPage() {
   const [loading, setLoading] = useState(false);
   const [skippedFace, setSkippedFace] = useState(false);
   const [isTeacher, setIsTeacher] = useState(false);
-  
+
   // Suppress warnings from browser extensions
   useEffect(() => {
     const originalError = console.error;
@@ -54,20 +54,44 @@ export default function RegisterPage() {
     e.preventDefault();
     // Validate numeric fields only for students
     if (!isTeacher) {
-      if (!/^\d+$/.test(formData.prn)) {
-        toast.error('PRN must be a numeric BigInt');
+      if (!/^\d{1,20}$/.test(formData.prn)) {
+        toast.error('PRN must be a numeric value up to 20 digits');
         return;
       }
-      if (!/^\d+$/.test(formData.rollNumber)) {
-        toast.error('Roll Number must be a numeric Integer');
+      if (!/^\d{1,10}$/.test(formData.rollNumber)) {
+        toast.error('Roll Number must be a numeric value up to 10 digits');
         return;
       }
     }
-    if (formData.password !== formData.confirmPassword) {
+
+    // Password Validation
+    const password = formData.password;
+    if (password.length < 8 || password.length > 32) {
+      toast.error('Password must be between 8 and 32 characters');
+      return;
+    }
+    if (!/[A-Z]/.test(password)) {
+      toast.error('Password must contain at least one uppercase letter');
+      return;
+    }
+    if (!/[a-z]/.test(password)) {
+      toast.error('Password must contain at least one lowercase letter');
+      return;
+    }
+    if (!/[0-9]/.test(password)) {
+      toast.error('Password must contain at least one number');
+      return;
+    }
+    if (!/[!@#$%^&*()_+{}\[\]:;<>,.?~\\/-]/.test(password)) {
+      toast.error('Password must contain at least one special character');
+      return;
+    }
+
+    if (password !== formData.confirmPassword) {
       toast.error('Passwords do not match');
       return;
     }
-    
+
     if (isTeacher) {
       // Teachers skip face enrollment by default for now
       completeRegistrationOnly();
@@ -81,7 +105,7 @@ export default function RegisterPage() {
     try {
       const fullName = `${formData.firstName} ${formData.middleName} ${formData.lastName}`.trim();
       const { confirmPassword, prn, rollNumber, ...baseData } = formData;
-      
+
       const dataToSend = {
         ...baseData,
         fullName,
@@ -97,10 +121,10 @@ export default function RegisterPage() {
         },
         body: JSON.stringify(dataToSend),
       });
-      
+
       const token = userRes.data?.accessToken;
       if (token) localStorage.setItem('token', token);
-      
+
       setSkippedFace(true);
       toast.success(isTeacher ? 'Teacher account created' : 'Account created (Face enrollment skipped)');
       setStep('SUCCESS');
@@ -114,18 +138,16 @@ export default function RegisterPage() {
   const onFaceCapture = async (faceImage: string) => {
     if (loading) return;
     const newImages = [...faceImages, faceImage];
-    
-    if (newImages.length < 4) {
-      setFaceImages(newImages);
-      setCurrentAngleIndex(newImages.length);
-      toast.success(`${ANGLES[newImages.length - 1].label} captured`);
-      return;
-    }
 
-    // All 4 captured, proceed to registration
+    setFaceImages(newImages);
+    setCurrentAngleIndex(newImages.length);
+    toast.success(`${ANGLES[newImages.length - 1].label} captured`);
+  };
+
+  const finalizeFaceEnrollment = async () => {
+    if (faceImages.length < 4 || loading) return;
+
     setLoading(true);
-    setFaceImages(newImages); // Ensure state is updated before API call
-    
     try {
       if (!isStandaloneFace) {
         const fullName = `${formData.firstName} ${formData.middleName} ${formData.lastName}`.trim();
@@ -134,10 +156,10 @@ export default function RegisterPage() {
         // 1. Create User Account
         const userRes = await fetchWithAuth('/auth/register', {
           method: 'POST',
-          body: JSON.stringify({ 
-            ...dataToSend, 
+          body: JSON.stringify({
+            ...dataToSend,
             fullName,
-            role: 'STUDENT' 
+            role: 'STUDENT'
           }),
         });
 
@@ -152,7 +174,7 @@ export default function RegisterPage() {
       // 2. Enroll Faces (Batch)
       await fetchWithAuth('/biometric/face/register', {
         method: 'POST',
-        body: JSON.stringify({ faceImages: newImages }),
+        body: JSON.stringify({ faceImages: faceImages }),
       });
 
       toast.success(isStandaloneFace ? 'Biometric profile updated' : 'Registration successful');
@@ -164,9 +186,6 @@ export default function RegisterPage() {
       }, 2000);
     } catch (err: any) {
       toast.error(err.message || 'Registration failed');
-      // DON'T reset faceImages immediately so user can see they reached 4/4
-      // and maybe retry or check why it failed.
-      // But we should reset if they want to try again.
       console.error('Registration Flow Error:', err);
     } finally {
       setLoading(false);
@@ -177,7 +196,7 @@ export default function RegisterPage() {
     <div className="min-h-screen flex items-center justify-center p-6 relative" suppressHydrationWarning>
       <AnimatePresence mode="wait">
         {step === 'INFO' && (
-          <motion.div 
+          <motion.div
             key="info"
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -218,10 +237,10 @@ export default function RegisterPage() {
                 <label className="text-[10px] font-bold uppercase tracking-wider text-white/40 ml-1">First Name</label>
                 <div className="relative">
                   <User className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-primary" />
-                  <input 
-                    className="input-field pl-12 text-sm" placeholder="John" required 
+                  <input
+                    className="input-field pl-12 text-sm" placeholder="John" required
                     value={formData.firstName}
-                    onChange={(e) => setFormData({...formData, firstName: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, firstName: e.target.value })}
                     suppressHydrationWarning
                   />
                 </div>
@@ -229,10 +248,10 @@ export default function RegisterPage() {
               <div className="space-y-1">
                 <label className="text-[10px] font-bold uppercase tracking-wider text-white/40 ml-1">Middle Name</label>
                 <div className="relative">
-                  <input 
+                  <input
                     className="input-field px-5 text-sm" placeholder="Quincy"
                     value={formData.middleName}
-                    onChange={(e) => setFormData({...formData, middleName: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, middleName: e.target.value })}
                     suppressHydrationWarning
                   />
                 </div>
@@ -240,10 +259,10 @@ export default function RegisterPage() {
               <div className="space-y-1">
                 <label className="text-[10px] font-bold uppercase tracking-wider text-white/40 ml-1">Last Name</label>
                 <div className="relative">
-                  <input 
-                    className="input-field px-5 text-sm" placeholder="Doe" required 
+                  <input
+                    className="input-field px-5 text-sm" placeholder="Doe" required
                     value={formData.lastName}
-                    onChange={(e) => setFormData({...formData, lastName: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, lastName: e.target.value })}
                     suppressHydrationWarning
                   />
                 </div>
@@ -256,10 +275,10 @@ export default function RegisterPage() {
                 </label>
                 <div className="relative">
                   <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-secondary" />
-                  <input 
-                    type="email" className="input-field pl-12 text-sm" placeholder="john.doe@university.edu" required 
+                  <input
+                    type="email" className="input-field pl-12 text-sm" placeholder="john.doe@university.edu" required
                     value={formData.email}
-                    onChange={(e) => setFormData({...formData, email: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                     suppressHydrationWarning
                   />
                 </div>
@@ -271,10 +290,10 @@ export default function RegisterPage() {
                     <label className="text-[10px] font-bold uppercase tracking-wider text-white/40 ml-1">PRN (BigInt)</label>
                     <div className="relative">
                       <Hash className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-accent" />
-                      <input 
-                        className="input-field pl-12 text-sm" placeholder="123456789012" required 
+                      <input
+                        className="input-field pl-12 text-sm" placeholder="123456789012" required
                         value={formData.prn}
-                        onChange={(e) => setFormData({...formData, prn: e.target.value.replace(/\D/g, '')})}
+                        onChange={(e) => setFormData({ ...formData, prn: e.target.value.replace(/\D/g, '') })}
                         suppressHydrationWarning
                       />
                     </div>
@@ -284,10 +303,10 @@ export default function RegisterPage() {
                     <label className="text-[10px] font-bold uppercase tracking-wider text-white/40 ml-1">Roll No (Int)</label>
                     <div className="relative">
                       <BookOpen className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-emerald-400" />
-                      <input 
-                        className="input-field pl-12 text-sm" placeholder="42" required 
+                      <input
+                        className="input-field pl-12 text-sm" placeholder="42" required
                         value={formData.rollNumber}
-                        onChange={(e) => setFormData({...formData, rollNumber: e.target.value.replace(/\D/g, '')})}
+                        onChange={(e) => setFormData({ ...formData, rollNumber: e.target.value.replace(/\D/g, '') })}
                         suppressHydrationWarning
                       />
                     </div>
@@ -299,16 +318,27 @@ export default function RegisterPage() {
                 <label className="text-[10px] font-bold uppercase tracking-wider text-white/40 ml-1">Account Password</label>
                 <div className="relative">
                   <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-primary" />
-                  <input 
-                    type="password" 
-                    className="input-field pl-12 text-sm" 
-                    placeholder="••••••••" 
-                    required 
-                    minLength={6}
+                  <input
+                    type="password"
+                    className="input-field pl-12 text-sm"
+                    placeholder="••••••••"
+                    required
+                    minLength={8}
+                    maxLength={32}
                     value={formData.password}
-                    onChange={(e) => setFormData({...formData, password: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                     suppressHydrationWarning
                   />
+                  <div className="absolute top-1/2 -translate-y-1/2 right-4 group">
+                    <ShieldCheck className={`w-4 h-4 ${formData.password.length >= 8 && /[A-Z]/.test(formData.password) && /[a-z]/.test(formData.password) && /[0-9]/.test(formData.password) && /[!@#$%^&*()_+{}\[\]:;<>,.?~\\/-]/.test(formData.password) ? 'text-emerald-500' : 'text-white/20'}`} />
+                    <div className="absolute right-0 bottom-full mb-2 hidden group-hover:block w-48 p-2 bg-black/90 rounded border border-white/10 text-[10px] text-white/70 z-10 shadow-xl">
+                      Password requires: <br />
+                      • 8-32 characters<br />
+                      • Uppercase & lowercase<br />
+                      • Number<br />
+                      • Special character
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -316,21 +346,21 @@ export default function RegisterPage() {
                 <label className="text-[10px] font-bold uppercase tracking-wider text-white/40 ml-1">Confirm Password</label>
                 <div className="relative">
                   <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-primary/50" />
-                  <input 
-                    type="password" 
-                    className="input-field pl-12 text-sm" 
-                    placeholder="••••••••" 
-                    required 
+                  <input
+                    type="password"
+                    className="input-field pl-12 text-sm"
+                    placeholder="••••••••"
+                    required
                     value={formData.confirmPassword}
-                    onChange={(e) => setFormData({...formData, confirmPassword: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
                     suppressHydrationWarning
                   />
                 </div>
               </div>
 
               <div className="md:col-span-3 pt-6" suppressHydrationWarning>
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   className="w-full btn-primary flex items-center justify-center space-x-3 py-4 group"
                   suppressHydrationWarning
                 >
@@ -345,7 +375,7 @@ export default function RegisterPage() {
         )}
 
         {step === 'FACE_ENROLL' && (
-          <motion.div 
+          <motion.div
             key="face"
             initial={{ opacity: 0, x: 50 }}
             animate={{ opacity: 1, x: 0 }}
@@ -353,7 +383,7 @@ export default function RegisterPage() {
           >
             {/* Step Progress Bar */}
             <div className="absolute top-0 left-0 h-1 bg-primary/20 w-full">
-              <motion.div 
+              <motion.div
                 className="h-full bg-primary"
                 initial={{ width: 0 }}
                 animate={{ width: `${((faceImages.length) / 4) * 100}%` }}
@@ -362,16 +392,16 @@ export default function RegisterPage() {
 
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-4">
-                <button 
-                  onClick={() => { 
+                <button
+                  onClick={() => {
                     if (isStandaloneFace) {
                       router.push('/student/dashboard');
                     } else {
-                      setStep('INFO'); 
-                      setFaceImages([]); 
-                      setCurrentAngleIndex(0); 
+                      setStep('INFO');
+                      setFaceImages([]);
+                      setCurrentAngleIndex(0);
                     }
-                  }} 
+                  }}
                   className="p-2 rounded-full hover:bg-white/5 transition-all"
                 >
                   <ChevronLeft className="w-6 h-6" />
@@ -396,10 +426,10 @@ export default function RegisterPage() {
             </div>
 
             {faceImages.length < 4 ? (
-              <CameraCapture 
+              <CameraCapture
                 key={`angle-${currentAngleIndex}`}
-                onCapture={onFaceCapture} 
-                title={`Capture ${ANGLES[currentAngleIndex].label}`} 
+                onCapture={onFaceCapture}
+                title={`Capture ${ANGLES[currentAngleIndex].label}`}
               />
             ) : (
               <div className="h-[350px] flex flex-col items-center justify-center space-y-6 glass-card rounded-3xl border-dashed border-primary/20 p-6">
@@ -408,26 +438,26 @@ export default function RegisterPage() {
                   <h4 className="font-bold text-lg">All Samples Collected</h4>
                   <p className="text-sm text-white/40">Your biometric samples are ready for processing</p>
                 </div>
-                
+
                 {!loading && (
                   <div className="flex flex-col w-full space-y-3">
-                    <button 
-                      onClick={() => onFaceCapture(faceImages[3])} 
+                    <button
+                      onClick={finalizeFaceEnrollment}
                       className="btn-primary w-full py-3 text-xs flex items-center justify-center space-x-2"
                     >
                       <ShieldCheck className="w-4 h-4" />
                       <span>Finalize and Submit</span>
                     </button>
-                    
+
                     <div className="grid grid-cols-2 gap-3">
-                      <button 
+                      <button
                         onClick={() => { setFaceImages([]); setCurrentAngleIndex(0); }}
                         className="btn-secondary py-3 text-[10px] uppercase tracking-widest font-bold flex items-center justify-center space-x-2"
                       >
                         <RefreshCw className="w-3 h-3" />
                         <span>Retake All</span>
                       </button>
-                      <button 
+                      <button
                         onClick={() => router.push(isStandaloneFace ? '/student/dashboard' : '/')}
                         className="bg-white/5 hover:bg-white/10 border border-white/5 py-3 rounded-2xl text-[10px] uppercase tracking-widest font-bold flex items-center justify-center space-x-2 transition-all"
                       >
@@ -439,7 +469,7 @@ export default function RegisterPage() {
                 )}
               </div>
             )}
-            
+
             {loading && (
               <div className="absolute inset-0 bg-black/40 backdrop-blur-sm z-50 flex flex-col items-center justify-center rounded-[40px]">
                 <RefreshCw className="w-12 h-12 text-primary animate-spin mb-4" />
@@ -449,7 +479,7 @@ export default function RegisterPage() {
             )}
 
             {!loading && faceImages.length === 0 && (
-              <button 
+              <button
                 onClick={completeRegistrationOnly}
                 className="w-full py-3 text-xs text-white/30 hover:text-white transition-colors"
               >
@@ -460,7 +490,7 @@ export default function RegisterPage() {
         )}
 
         {step === 'SUCCESS' && (
-          <motion.div 
+          <motion.div
             key="success"
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -472,15 +502,15 @@ export default function RegisterPage() {
             <div className="space-y-2">
               <h1 className="text-3xl font-bold">{isTeacher ? 'Registration Complete' : (skippedFace ? 'Account Created' : 'Enrollment Complete')}</h1>
               <p className="text-white/50">
-                {isTeacher 
+                {isTeacher
                   ? 'Your teacher account has been created successfully. You can now access the dashboard.'
-                  : (skippedFace 
-                      ? 'Your account is ready, but you will need to enroll your face later to mark attendance.' 
-                      : 'Your identity has been verified and registered on the cloud node.')
+                  : (skippedFace
+                    ? 'Your account is ready, but you will need to enroll your face later to mark attendance.'
+                    : 'Your identity has been verified and registered on the cloud node.')
                 }
               </p>
             </div>
-            <button 
+            <button
               onClick={() => router.push(isStandaloneFace ? '/student/dashboard' : '/login')}
               className="w-full btn-primary"
             >
