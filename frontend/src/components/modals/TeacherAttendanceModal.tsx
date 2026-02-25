@@ -283,18 +283,17 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                 body: JSON.stringify({ faceImage: capturedImage }),
             });
             if (res.success) {
-                toast.success('ðŸŽ‰ Face registered successfully!');
+                toast.success('🎉 Face registered! You can now mark attendance by scanning your face.');
                 setView('hub');
                 setCapturedImage(null);
+                // Refresh status so faceRegistered flag updates
+                fetchStatus();
             }
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'Registration failed';
-            /* If endpoint doesn't exist yet, show graceful message */
-            toast.error(msg.includes('404') || msg.includes('not found')
-                ? 'Face registration is managed in Profile Settings.'
-                : msg);
+            toast.error(msg || 'Face registration failed. Please try again.');
             setCapturedImage(null);
-            setView('hub');
+            setView('register_face');
         }
     };
 

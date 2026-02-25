@@ -54,6 +54,9 @@ const userSchema = new mongoose.Schema({
   faceEncoding: {
     type: Buffer, // Serialized numpy array from Python service
   },
+  faceImageData: {
+    type: Buffer, // Raw registered face image bytes (for fallback comparison)
+  },
   faceImageUrl: {
     type: String, // Cloudinary URL
   },
