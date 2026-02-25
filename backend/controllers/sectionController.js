@@ -3,7 +3,7 @@ const Course = require('../models/Course');
 const User = require('../models/User');
 const Lecture = require('../models/Lecture');
 const AttendanceRecord = require('../models/AttendanceRecord');
-const { ROLES } = require('../config/constants');
+const { ROLES, LECTURE_STATUS } = require('../config/constants');
 
 /**
  * Teacher creates a new classroom (Section)
@@ -14,45 +14,25 @@ const createClassroom = async (req, res, next) => {
         const { courseName, courseCode, sectionName, academicYear, semester } = req.body;
         const teacherId = req.user._id;
 
-        // 1. Find or Create Course
-        // If no course code provided or we want to force unique random codes for ad-hoc classes:
         const generatedCode = 'CRS-' + Math.random().toString(36).substr(2, 6).toUpperCase();
         const finalCourseCode = courseCode ? courseCode.toUpperCase() : generatedCode;
 
         let course = await Course.findOne({ courseCode: finalCourseCode });
-
         if (!course) {
             course = await Course.create({
                 courseCode: finalCourseCode,
                 courseName,
-                departmentId: req.user.department || undefined, // Optional
+                departmentId: req.user.department || undefined,
                 credits: 3
             });
         }
 
-        // 2. Create Section
-        const section = await Section.create({
-            courseId: course._id,
-            sectionName,
-            academicYear,
-            semester,
-            teacherId,
-        });
+        const section = await Section.create({ courseId: course._id, sectionName, academicYear, semester, teacherId });
 
-        res.status(201).json({
-            success: true,
-            message: 'Classroom created successfully',
-            data: {
-                section,
-                joinCode: section.joinCode
-            }
-        });
+        res.status(201).json({ success: true, message: 'Classroom created successfully', data: { section, joinCode: section.joinCode } });
     } catch (error) {
         if (error.code === 11000) {
-            return res.status(400).json({
-                success: false,
-                message: 'A section with these details already exists'
-            });
+            return res.status(400).json({ success: false, message: 'A section with these details already exists' });
         }
         next(error);
     }
@@ -68,38 +48,20 @@ const joinClassroom = async (req, res, next) => {
         const studentId = req.user._id;
 
         if (req.user.role !== ROLES.STUDENT) {
-            return res.status(403).json({
-                success: false,
-                message: 'Only students can join classrooms'
-            });
+            return res.status(403).json({ success: false, message: 'Only students can join classrooms' });
         }
 
-        // 1. Find section by code
         const section = await Section.findOne({ joinCode: joinCode.toUpperCase(), isActive: true });
-        if (!section) {
-            return res.status(404).json({
-                success: false,
-                message: 'Invalid or inactive classroom code'
-            });
-        }
+        if (!section) return res.status(404).json({ success: false, message: 'Invalid or inactive classroom code' });
 
-        // 2. Check if already joined
         if (section.students.includes(studentId)) {
-            return res.status(400).json({
-                success: false,
-                message: 'You are already enrolled in this classroom'
-            });
+            return res.status(400).json({ success: false, message: 'You are already enrolled in this classroom' });
         }
 
-        // 3. Enroll
         section.students.push(studentId);
         await section.save();
 
-        res.json({
-            success: true,
-            message: 'Successfully joined classroom',
-            data: { section }
-        });
+        res.json({ success: true, message: 'Successfully joined classroom', data: { section } });
     } catch (error) {
         next(error);
     }
@@ -114,11 +76,32 @@ const getTeacherClassrooms = async (req, res, next) => {
         const sections = await Section.find({ teacherId: req.user._id })
             .populate('courseId', 'courseCode courseName')
             .sort({ createdAt: -1 });
+        res.json({ success: true, data: { sections } });
+    } catch (error) {
+        next(error);
+    }
+};
 
-        res.json({
-            success: true,
-            data: { sections }
-        });
+/**
+ * Get a single classroom detail (teacher or enrolled student)
+ * GET /api/sections/:sectionId
+ */
+const getClassroomDetail = async (req, res, next) => {
+    try {
+        const { sectionId } = req.params;
+        const section = await Section.findById(sectionId)
+            .populate('courseId', 'courseCode courseName credits')
+            .populate('teacherId', 'fullName email')
+            .populate('students', 'fullName email prn rollNumber');
+
+        if (!section) return res.status(404).json({ success: false, message: 'Classroom not found' });
+
+        const isTeacher = section.teacherId._id.toString() === req.user._id.toString();
+        const isStudent = section.students.some(s => s._id.toString() === req.user._id.toString());
+
+        if (!isTeacher && !isStudent) return res.status(403).json({ success: false, message: 'Access denied' });
+
+        res.json({ success: true, data: { section } });
     } catch (error) {
         next(error);
     }
@@ -134,36 +117,26 @@ const getStudentClassrooms = async (req, res, next) => {
             .populate('courseId', 'courseCode courseName')
             .populate('teacherId', 'fullName email')
             .sort({ createdAt: -1 });
-
-        res.json({
-            success: true,
-            data: { sections }
-        });
+        res.json({ success: true, data: { sections } });
     } catch (error) {
         next(error);
     }
 };
 
 /**
- * Get all lectures for a specific section
+ * Get all lectures for a specific section (with attendance counts)
  * GET /api/sections/:sectionId/lectures
+ * Used by teacher logs page, GPS attendance selector, live session picker.
  */
 const getSectionLectures = async (req, res, next) => {
     try {
         const { sectionId } = req.params;
 
-        // Verify section exists and user has access
         const section = await Section.findById(sectionId);
-        if (!section) {
-            return res.status(404).json({ success: false, message: 'Section not found' });
-        }
+        if (!section) return res.status(404).json({ success: false, message: 'Section not found' });
 
-        // Fetch all lectures for the section, newest first
-        const lectures = await Lecture.find({ sectionId })
-            .sort({ scheduledStart: -1 })
-            .lean();
+        const lectures = await Lecture.find({ sectionId }).sort({ scheduledStart: -1 }).lean();
 
-        // Attach attendance count to each lecture
         const lecturesWithStats = await Promise.all(
             lectures.map(async (lecture) => {
                 const presentCount = await AttendanceRecord.countDocuments({ lectureId: lecture._id });
@@ -171,11 +144,67 @@ const getSectionLectures = async (req, res, next) => {
             })
         );
 
-        res.json({
-            success: true,
-            count: lecturesWithStats.length,
-            data: { lectures: lecturesWithStats, section }
+        res.json({ success: true, count: lecturesWithStats.length, data: { lectures: lecturesWithStats, section } });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// Alias kept for friend's frontend code that uses getClassroomLectures
+const getClassroomLectures = getSectionLectures;
+
+/**
+ * Teacher schedules a new lecture
+ * POST /api/sections/:sectionId/lectures
+ */
+const scheduleLecture = async (req, res, next) => {
+    try {
+        const { sectionId } = req.params;
+        const { topic, scheduledStart, scheduledEnd, roomNumber, notes } = req.body;
+
+        const section = await Section.findById(sectionId);
+        if (!section) return res.status(404).json({ success: false, message: 'Classroom not found' });
+        if (section.teacherId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ success: false, message: 'Only the classroom teacher can schedule lectures' });
+        }
+        if (!scheduledStart || !scheduledEnd) {
+            return res.status(400).json({ success: false, message: 'Start and end time are required' });
+        }
+        if (new Date(scheduledStart) >= new Date(scheduledEnd)) {
+            return res.status(400).json({ success: false, message: 'End time must be after start time' });
+        }
+
+        const lecture = await Lecture.create({
+            sectionId, teacherId: req.user._id,
+            scheduledStart: new Date(scheduledStart),
+            scheduledEnd: new Date(scheduledEnd),
+            roomNumber: roomNumber || section.roomNumber,
+            topic: topic || 'General Lecture',
+            notes,
+            status: LECTURE_STATUS.SCHEDULED,
         });
+
+        res.status(201).json({ success: true, message: 'Lecture scheduled successfully', data: { lecture } });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * Cancel a scheduled lecture
+ * DELETE /api/sections/:sectionId/lectures/:lectureId
+ */
+const cancelLecture = async (req, res, next) => {
+    try {
+        const { sectionId, lectureId } = req.params;
+        const lecture = await Lecture.findOne({ _id: lectureId, sectionId });
+        if (!lecture) return res.status(404).json({ success: false, message: 'Lecture not found' });
+        if (lecture.teacherId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ success: false, message: 'Only the teacher can cancel this lecture' });
+        }
+        lecture.status = LECTURE_STATUS.CANCELLED;
+        await lecture.save();
+        res.json({ success: true, message: 'Lecture cancelled successfully' });
     } catch (error) {
         next(error);
     }
@@ -186,5 +215,9 @@ module.exports = {
     joinClassroom,
     getTeacherClassrooms,
     getStudentClassrooms,
-    getSectionLectures
+    getClassroomDetail,
+    getSectionLectures,
+    getClassroomLectures,
+    scheduleLecture,
+    cancelLecture,
 };
