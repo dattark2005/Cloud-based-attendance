@@ -130,41 +130,77 @@ const markAttendance = async (req, res, next) => {
       });
     }
 
-    // Verify face with Python service (optional if no image provided)
+    // ── FACE VERIFICATION (MANDATORY) ──────────────────────────────────────────
+    if (!faceImage) {
+      return res.status(400).json({
+        success: false,
+        message: 'Face image is required to mark attendance.',
+        data: { faceRequired: true },
+      });
+    }
+
+    // Make sure the student has a registered face
+    const studentUser = await User.findById(studentId).select('+faceEncoding +faceImageData');
+    if (!studentUser || (!studentUser.faceEncoding && !studentUser.faceImageData)) {
+      return res.status(400).json({
+        success: false,
+        message: 'You have not registered your face yet. Please go to your Profile and register your face first.',
+        data: { faceNotRegistered: true },
+      });
+    }
+
     let faceImageUrl;
     let confidenceScore = 0;
-    let verificationMethod = 'MANUAL';
+    const verificationMethod = 'FACE';
 
-    if (faceImage) {
-      verificationMethod = 'FACE';
+    try {
+      // Upload face image to Cloudinary
+      const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+      const cloudinaryResult = await uploadToCloudinary(
+        `data:image/jpeg;base64,${imageBuffer.toString('base64')}`,
+        CLOUDINARY_FOLDERS.ATTENDANCE,
+        'image'
+      );
+      faceImageUrl = cloudinaryResult.url;
+
+      // Verify face against registered biometric — Python AI service only, no fallback
+      let verified = false;
       try {
-        // Upload face image to Cloudinary
-        const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-        const cloudinaryResult = await uploadToCloudinary(
-          `data:image/jpeg;base64,${imageBuffer.toString('base64')}`,
-          CLOUDINARY_FOLDERS.ATTENDANCE,
-          'image'
-        );
-        faceImageUrl = cloudinaryResult.url;
-
-        // Verify face
         const faceVerificationResult = await verifyFace(studentId.toString(), imageBuffer);
         confidenceScore = faceVerificationResult.confidence || 0;
-
-        if (!faceVerificationResult.verified || confidenceScore < DEFAULTS.MIN_CONFIDENCE_SCORE) {
-          return res.status(401).json({
-            success: false,
-            message: 'Face verification failed. Please try again.',
-            confidence: confidenceScore,
-          });
-        }
-      } catch (error) {
-        console.error('Face verification error:', error);
-        return res.status(500).json({
+        verified = faceVerificationResult.verified && confidenceScore >= DEFAULTS.MIN_CONFIDENCE_SCORE;
+      } catch (serviceErr) {
+        // Python service unavailable — hard fail, no local fallback allowed
+        console.error('❌ Python face service unavailable for student attendance — no fallback allowed:', serviceErr.message);
+        return res.status(503).json({
           success: false,
-          message: 'Face verification service error',
+          message: '⚠️ Face recognition service is currently unavailable. Please ensure the Python AI service is running and try again.',
+          data: { serviceUnavailable: true },
         });
       }
+
+      if (!verified) {
+        // ── PROXY ATTEMPT DETECTED ──────────────────────────────────────────
+        // The captured face does NOT match the registered face of the logged-in student.
+        // This fires when someone tries to mark attendance on behalf of another person.
+        console.warn(
+          `🚨 PROXY ATTEMPT: studentId=${studentId} | confidence=${(confidenceScore * 100).toFixed(1)}% | ip=${req.ip} | lectureId=${lectureId}`
+        );
+        return res.status(401).json({
+          success: false,
+          message: '🚫 Proxy attendance detected. The face in the camera does not match your registered profile. Attendance NOT marked.',
+          data: { confidence: confidenceScore, verified: false, proxyAttempt: true },
+        });
+      }
+
+      // Log successful biometric verification for audit
+      console.log(`✅ Student face verified: studentId=${studentId}, confidence=${(confidenceScore * 100).toFixed(1)}%`);
+    } catch (error) {
+      console.error('Face verification error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Face verification service error. Please try again.',
+      });
     }
 
     // Determine attendance status (present or late)

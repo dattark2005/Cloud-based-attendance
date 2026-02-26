@@ -9,14 +9,14 @@ router.use(authenticate);
 
 /**
  * POST /api/gps-attendance/mark
- * Teacher marks attendance using GPS + live photo.
- * Body: { lectureId, lat, lng, accuracy, timestamp, clientTime, livePhoto }
+ * ONLY the specific teacher conducting that lecture can mark GPS attendance.
+ * Body: { lectureId, lat, lng, accuracy, timestamp, clientTime, livePhoto, faceImage }
  */
-router.post('/mark', authorize(ROLES.TEACHER, ROLES.ADMIN), markGpsAttendance);
+router.post('/mark', authorize(ROLES.TEACHER), markGpsAttendance);
 
 /**
  * PATCH /api/gps-attendance/set-location/:sectionId
- * Teacher saves classroom GPS coordinates for a section.
+ * Teacher OR admin saves classroom GPS coordinates for a section.
  * Body: { lat, lng, radiusMeters? }
  */
 router.patch('/set-location/:sectionId', authorize(ROLES.TEACHER, ROLES.ADMIN), setClassroomLocation);

@@ -16,9 +16,10 @@ const startSession = async (req, res, next) => {
     try {
         const { sectionId } = req.params;
         const teacherId = req.user._id;
+        const { topic, roomNumber } = req.body;
 
         // 1. Verify section and ownership
-        const section = await Section.findById(sectionId);
+        const section = await Section.findById(sectionId).populate('courseId', 'courseName');
         if (!section) {
             return res.status(404).json({ success: false, message: 'Section not found' });
         }
@@ -27,11 +28,8 @@ const startSession = async (req, res, next) => {
             return res.status(403).json({ success: false, message: 'Unauthorized' });
         }
 
-        // 2. Check for already ongoing session
-        const ongoing = await Lecture.findOne({ sectionId, status: LECTURE_STATUS.ONGOING });
-        if (ongoing) {
-            return res.status(400).json({ success: false, message: 'A session is already ongoing' });
-        }
+        // 2. Allow multiple sessions per day per section — no duplicate guard.
+        //    (A teacher may conduct multiple lecture slots in the same classroom in one day.)
 
         // 3. Create and start lecture
         const lecture = await Lecture.create({
@@ -39,21 +37,23 @@ const startSession = async (req, res, next) => {
             teacherId,
             status: LECTURE_STATUS.ONGOING,
             actualStart: new Date(),
-            scheduledStart: new Date(), // Using current for quick sessions
-            scheduledEnd: new Date(Date.now() + 60 * 60 * 1000) // Default 1 hour
+            scheduledStart: new Date(),
+            scheduledEnd: new Date(Date.now() + 60 * 60 * 1000), // Default 1 hour
+            topic: topic || undefined,
+            roomNumber: roomNumber || section.roomNumber,
         });
 
         // 4. Notify everyone in the section via Socket.io
         broadcastToSection(sectionId, 'session:started', {
             lectureId: lecture._id,
             courseName: section.courseId?.courseName,
-            teacherName: req.user.fullName
+            teacherName: req.user.fullName,
         });
 
         res.json({
             success: true,
             message: 'Session started successfully',
-            data: { lecture }
+            data: { lecture },
         });
     } catch (error) {
         next(error);

@@ -2,7 +2,6 @@ const User = require('../models/User');
 const { uploadToCloudinary } = require('../config/cloudinary');
 const { registerFace, batchRegisterFace, verifyFace, registerVoice, verifyVoice } = require('../utils/apiClient');
 const { ROLES, CLOUDINARY_FOLDERS } = require('../config/constants');
-const { compareFaceImages } = require('../utils/faceComparison');
 
 /* ─────────────────────────────────────────────────────────────────
  *  FACE REGISTRATION
@@ -165,41 +164,14 @@ const verifyUserFace = async (req, res, next) => {
         },
       });
     } catch (serviceError) {
-      // Python unavailable — fall through to local comparison
-      console.warn('⚠️  Python face service unavailable. Falling back to local image comparison.');
-    }
-
-    // ── 2. Local image comparison fallback ──
-    if (!user.faceImageData || user.faceImageData.length === 0) {
-      // Registered via Python but Python is now down — we have no local data to compare against
+      // Python service unavailable — hard fail, no local fallback
+      console.error('❌ Python face service unavailable in biometric verify — no fallback allowed:', serviceError.message);
       return res.status(503).json({
         success: false,
-        message: 'Face recognition service is currently unavailable. Please try again later.',
-        data: { verified: false },
+        message: '⚠️ Face recognition service is currently unavailable. Please ensure the Python AI service is running and try again.',
+        data: { verified: false, serviceUnavailable: true },
       });
     }
-
-    const { matched, confidence } = compareFaceImages(user.faceImageData, scanBuffer);
-
-    if (!matched) {
-      console.warn(`❌ Local comparison: face rejected for user ${targetUserId} (confidence=${confidence.toFixed(2)})`);
-      return res.status(401).json({
-        success: false,
-        message: '❌ Invalid face – face not recognised. Please try again.',
-        data: { verified: false, confidence, method: 'local_comparison' },
-      });
-    }
-
-    console.log(`✅ Local comparison: face verified for user ${targetUserId} (confidence=${confidence.toFixed(2)})`);
-    return res.json({
-      success: true,
-      message: 'Face verified successfully (local comparison)',
-      data: {
-        verified: true,
-        confidence,
-        method: 'local_comparison',
-      },
-    });
   } catch (error) {
     console.error('Face verification error:', error);
     next(error);

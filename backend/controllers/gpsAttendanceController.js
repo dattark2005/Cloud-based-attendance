@@ -1,7 +1,9 @@
 const Lecture = require('../models/Lecture');
 const Section = require('../models/Section');
+const User = require('../models/User');
 const AttendanceRecord = require('../models/AttendanceRecord');
 const { uploadToCloudinary } = require('../config/cloudinary');
+const { verifyFace } = require('../utils/apiClient');
 const { CLOUDINARY_FOLDERS, ROLES, VERIFICATION_METHODS } = require('../config/constants');
 
 /**
@@ -22,14 +24,8 @@ function haversineDistanceMetres(lat1, lon1, lat2, lon2) {
 /**
  * Anti-spoofing checks on incoming GPS from client.
  * Returns { ok: true } or { ok: false, reason: string }
- *
- * Timestamp window is 5 minutes to account for the time a teacher spends
- * navigating from GPS step → photo step → submit. The actual GPS position
- * cannot be changed once captured on the device — only the freshness is
- * verified here. The distance check provides the main location security.
  */
 function validateGpsPayload({ lat, lng, accuracy, timestamp, clientTime }) {
-    // 1. Coordinate range
     if (typeof lat !== 'number' || typeof lng !== 'number') {
         return { ok: false, reason: 'Invalid GPS coordinates — lat/lng must be numbers' };
     }
@@ -37,7 +33,6 @@ function validateGpsPayload({ lat, lng, accuracy, timestamp, clientTime }) {
         return { ok: false, reason: 'GPS coordinates out of valid range' };
     }
 
-    // 2. Accuracy must be declared and reasonable (≤ 200 m; browser sometimes reports 150-200 m indoors)
     if (typeof accuracy !== 'number' || accuracy > 200) {
         return {
             ok: false,
@@ -45,14 +40,11 @@ function validateGpsPayload({ lat, lng, accuracy, timestamp, clientTime }) {
         };
     }
 
-    // 3. GPS fix timestamp — must be from the last 5 minutes (300 s)
-    //    This allows for the multi-step flow (GPS fix → photo → submit) without forcing a new fix each time.
     const serverNow = Date.now();
     if (typeof timestamp !== 'number' || Math.abs(serverNow - timestamp) > 300_000) {
         return { ok: false, reason: 'GPS fix is too old (> 5 minutes). Go back and re-acquire your location.' };
     }
 
-    // 4. Client-submitted time vs server time — must match within 3 minutes (anti-replay)
     if (typeof clientTime !== 'number' || Math.abs(serverNow - clientTime) > 180_000) {
         return { ok: false, reason: 'Request timestamp mismatch. Sync your device clock and retry.' };
     }
@@ -61,18 +53,49 @@ function validateGpsPayload({ lat, lng, accuracy, timestamp, clientTime }) {
 }
 
 /**
+ * Verify teacher face via Python face recognition service ONLY.
+ * No local fallback — Python service must be running.
+ * Returns { verified: boolean, confidence: number, method: string }
+ * Throws with { serviceUnavailable: true } if Python service is down.
+ */
+async function verifyTeacherFaceViaPython(user, imageBuffer) {
+    try {
+        const result = await verifyFace(user._id.toString(), imageBuffer);
+        return {
+            verified: result.verified,
+            confidence: result.confidence || 0,
+            method: 'python_ai',
+        };
+    } catch (serviceErr) {
+        console.error('❌ Python face service unavailable for GPS attendance — no fallback allowed.');
+        const err = new Error('Face recognition service is currently unavailable. Please ensure the Python service is running and try again.');
+        err.serviceUnavailable = true;
+        throw err;
+    }
+}
+
+/**
  * POST /api/gps-attendance/mark
  *
- * Body: { lectureId, lat, lng, accuracy, timestamp, clientTime, livePhoto }
+ * Body: { lectureId, lat, lng, accuracy, timestamp, clientTime, livePhoto, faceImage }
  * Only TEACHER / ADMIN role allowed.
+ *
+ * Flow:
+ *   1. Validate GPS payload
+ *   2. Find & authorise lecture
+ *   3. GPS proximity check
+ *   4. *** FACE RECOGNITION CHECK (mandatory) ***
+ *   5. Upload live photo evidence
+ *   6. Create attendance record
  */
 const markGpsAttendance = async (req, res, next) => {
     try {
-        const { lectureId, lat, lng, accuracy, timestamp, clientTime, livePhoto } = req.body;
+        const { lectureId, lat, lng, accuracy, timestamp, clientTime, livePhoto, faceImage } = req.body;
 
         // ── Basic required field checks ────────────────────────────────────────
         if (!lectureId) return res.status(400).json({ success: false, message: 'lectureId is required' });
         if (!livePhoto) return res.status(400).json({ success: false, message: 'Live photo is required' });
+        if (!faceImage) return res.status(400).json({ success: false, message: 'Face image is required for biometric verification' });
 
         // ── GPS anti-spoofing validation ───────────────────────────────────────
         const gpsCheck = validateGpsPayload({ lat, lng, accuracy, timestamp, clientTime });
@@ -81,7 +104,6 @@ const markGpsAttendance = async (req, res, next) => {
         }
 
         // ── Verify lecture belongs to this teacher ─────────────────────────────
-        // Use lecture.teacherId (the direct field) — faster & no populate needed for auth
         const lecture = await Lecture.findById(lectureId).populate({
             path: 'sectionId',
             select: 'teacherId sectionName classroomLocation students',
@@ -92,13 +114,19 @@ const markGpsAttendance = async (req, res, next) => {
             return res.status(404).json({ success: false, message: 'Lecture not found' });
         }
 
-        // Check via lecture.teacherId (direct, always set) OR section teacher
+        // ── Gate 2: The logged-in teacher must be the one assigned to THIS lecture ──
+        // Gate 1 (role guard) already ran in middleware: only TEACHER role reaches here.
+        // This second check ensures the right teacher is marking — not a colleague.
         const isTeacher =
             (lecture.teacherId && lecture.teacherId.toString() === req.user._id.toString()) ||
             (lecture.sectionId?.teacherId && lecture.sectionId.teacherId.toString() === req.user._id.toString());
 
         if (!isTeacher) {
-            return res.status(403).json({ success: false, message: 'You are not the teacher of this lecture' });
+            console.warn(`🚨 GPS AUTH FAIL: teacher=${req.user._id} tried to mark attendance for lecture=${lectureId} (not their class)`);
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied. Only the teacher assigned to this lecture can mark GPS attendance for it.',
+            });
         }
 
         // ── Lecture must be ONGOING ─────────────────────────────────────────────
@@ -119,7 +147,6 @@ const markGpsAttendance = async (req, res, next) => {
         let locationVerified = false;
 
         if (clLat && clLng) {
-            // Classroom GPS is configured — enforce Haversine check
             distanceM = haversineDistanceMetres(lat, lng, clLat, clLng);
             if (distanceM > radiusMeters) {
                 return res.status(422).json({
@@ -130,11 +157,54 @@ const markGpsAttendance = async (req, res, next) => {
             }
             locationVerified = true;
         } else {
-            // Classroom GPS not configured yet — accept the attendance but flag as UNVERIFIED_LOCATION.
-            // Teacher is encouraged to set classroom coordinates for stricter verification.
             console.warn(`⚠️ GPS attendance marked WITHOUT classroom location check for section ${section?._id}`);
             locationVerified = false;
         }
+
+        // ── FACE RECOGNITION CHECK (mandatory — Python AI only) ──────────────
+        const teacher = await User.findById(req.user._id).select('+faceEncoding +faceImageData');
+
+        if (!teacher || (!teacher.faceEncoding && !teacher.faceImageData)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Face not registered. Please register your face in Profile before marking GPS attendance.',
+                data: { faceNotRegistered: true },
+            });
+        }
+
+        const faceBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+
+        let faceResult;
+        try {
+            faceResult = await verifyTeacherFaceViaPython(teacher, faceBuffer);
+        } catch (faceErr) {
+            if (faceErr.serviceUnavailable) {
+                return res.status(503).json({
+                    success: false,
+                    message: '⚠️ Face recognition service is unavailable. Please ensure the Python AI service is running and retry.',
+                    data: { serviceUnavailable: true },
+                });
+            }
+            throw faceErr;
+        }
+
+        if (!faceResult.verified) {
+            console.warn(
+                `🚨 GPS FACE MISMATCH: teacherId=${req.user._id} | confidence=${(faceResult.confidence * 100).toFixed(1)}% | method=${faceResult.method} | lectureId=${lectureId} | ip=${req.ip}`
+            );
+            return res.status(401).json({
+                success: false,
+                message: `🚫 Face not recognised. GPS attendance declined — your face must match your registered profile. (${(faceResult.confidence * 100).toFixed(0)}% match)`,
+                data: {
+                    verified: false,
+                    confidence: faceResult.confidence,
+                    method: faceResult.method,
+                    hint: 'Ensure good lighting, face the camera directly, and that you have registered your face in Profile.',
+                },
+            });
+        }
+
+        console.log(`✅ GPS face verified: teacher=${req.user._id}, confidence=${(faceResult.confidence * 100).toFixed(1)}%, method=${faceResult.method}`);
 
         // ── Upload live photo to Cloudinary (evidence) ──────────────────────────
         let photoUrl = null;
@@ -165,7 +235,7 @@ const markGpsAttendance = async (req, res, next) => {
             status: 'PRESENT',
             markedAt: serverTimestamp,
             verificationMethod: VERIFICATION_METHODS.GPS,
-            confidenceScore: locationVerified ? 1.0 : 0.7,
+            confidenceScore: locationVerified ? faceResult.confidence : Math.min(faceResult.confidence, 0.8),
             location: { latitude: lat, longitude: lng },
             gpsVerification: {
                 lat,
@@ -174,11 +244,12 @@ const markGpsAttendance = async (req, res, next) => {
                 distanceFromClassroom: Math.round(distanceM),
                 photoUrl,
             },
+            faceImageUrl: photoUrl, // The live classroom photo serves as face evidence
         });
 
         const distanceText = locationVerified
             ? `You were ${Math.round(distanceM)} m from the classroom.`
-            : `No classroom GPS configured — location not verified. Set classroom coords for stricter checks.`;
+            : `No classroom GPS configured — location not verified.`;
 
         res.json({
             success: true,
@@ -189,6 +260,11 @@ const markGpsAttendance = async (req, res, next) => {
                 distance: Math.round(distanceM),
                 locationVerified,
                 photoUrl,
+                faceVerification: {
+                    verified: true,
+                    confidence: faceResult.confidence,
+                    method: faceResult.method,
+                },
             },
         });
     } catch (error) {
