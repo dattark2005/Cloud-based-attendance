@@ -118,6 +118,27 @@ if (process.env.NODE_ENV === 'development') {
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
     res.json({ success: true, message: `Password reset for ${user.email} (${user.role})` });
   });
+
+  // GET /dev/face-check?email=... — check face encoding state
+  app.get('/dev/face-check', async (req, res) => {
+    const { email } = req.query;
+    const user = await User.findOne({ email }).select('+faceEncoding +faceImageData');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const TeacherAttendance = require('./models/TeacherAttendance');
+    const today = new Date().toISOString().slice(0, 10);
+    const records = await TeacherAttendance.find({ teacherId: user._id, date: today });
+    res.json({
+      email: user.email,
+      role: user.role,
+      faceRegisteredAt: user.faceRegisteredAt,
+      faceEncodingBytes: user.faceEncoding?.length ?? null,
+      faceEncodingIsValid1024: user.faceEncoding?.length === 1024,
+      hasFaceImageData: !!user.faceImageData,
+      faceImageDataBytes: user.faceImageData?.length ?? null,
+      todayAttendanceRecords: records.length,
+      today,
+    });
+  });
 }
 
 // ==================== ERROR HANDLING ====================

@@ -42,6 +42,7 @@ export default function RegisterPage() {
 
   const [faceImages, setFaceImages] = useState<string[]>([]);
   const [currentAngleIndex, setCurrentAngleIndex] = useState(0);
+  const [cameraResetTrigger, setCameraResetTrigger] = useState(0);
 
   const ANGLES = [
     { label: "Look Straight", sub: "Neutral expression" },
@@ -141,6 +142,8 @@ export default function RegisterPage() {
 
     setFaceImages(newImages);
     setCurrentAngleIndex(newImages.length);
+    // Increment resetTrigger to clear the preview in CameraCapture without remounting webcam
+    setCameraResetTrigger(prev => prev + 1);
     toast.success(`${ANGLES[newImages.length - 1].label} captured`);
   };
 
@@ -427,9 +430,9 @@ export default function RegisterPage() {
 
             {faceImages.length < 4 ? (
               <CameraCapture
-                key={`angle-${currentAngleIndex}`}
                 onCapture={onFaceCapture}
-                title={`Capture ${ANGLES[currentAngleIndex].label}`}
+                title={`Capture ${ANGLES[Math.min(currentAngleIndex, 3)].label}`}
+                resetTrigger={cameraResetTrigger}
               />
             ) : (
               <div className="h-[350px] flex flex-col items-center justify-center space-y-6 glass-card rounded-3xl border-dashed border-primary/20 p-6">

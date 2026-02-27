@@ -40,6 +40,7 @@ interface TeacherAttendanceModalProps {
     onClose: () => void;
     onSuccess?: () => void;
     initialView?: ViewState | null;
+    lectureId?: string | null;
 }
 
 interface AttendanceRecord {
@@ -51,8 +52,10 @@ interface AttendanceRecord {
 
 interface StatusData {
     marked: boolean;
+    markedForLecture: boolean;
     record: AttendanceRecord | null;
     faceRegistered: boolean;
+    voiceRegistered?: boolean;
 }
 
 /* â”€â”€â”€ Framer Motion variants â”€â”€â”€ */
@@ -69,7 +72,7 @@ const fadeUp: Variants = {
 };
 
 /* â”€â”€â”€ Option cards data â”€â”€â”€ */
-const OPTIONS = [
+const ALL_OPTIONS = [
     {
         id: 'register_face' as ViewState,
         icon: UserPlus,
@@ -80,6 +83,7 @@ const OPTIONS = [
         border: 'border-violet-500/20',
         bg: 'bg-violet-500/10',
         iconColor: 'text-violet-400',
+        showWhen: 'face_not_registered', // only when face not registered
     },
     {
         id: 'scan_face' as ViewState,
@@ -91,17 +95,19 @@ const OPTIONS = [
         border: 'border-blue-500/20',
         bg: 'bg-blue-500/10',
         iconColor: 'text-blue-400',
+        showWhen: 'always',
     },
     {
         id: 'voice_face' as ViewState,
         icon: Mic,
         label: 'Voice & Face',
-        subtitle: 'Dual biometric â€“ max security',
+        subtitle: 'Dual biometric — max security',
         gradient: 'from-purple-600 to-pink-600',
         glow: 'shadow-purple-500/25',
         border: 'border-purple-500/20',
         bg: 'bg-purple-500/10',
         iconColor: 'text-purple-400',
+        showWhen: 'voice_registered', // only when voice registered
     },
 ];
 
@@ -110,6 +116,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     onClose,
     onSuccess,
     initialView = null,
+    lectureId = null,
 }) => {
     const [view, setView] = useState<ViewState>('loading');
     const [statusData, setStatusData] = useState<StatusData | null>(null);
@@ -129,21 +136,25 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     const audioChunks = useRef<Blob[]>([]);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-    /* â”€â”€â”€ Fetch today's status â”€â”€â”€ */
+    /* ─── Fetch today's status (per-lecture when lectureId provided) ─── */
     const fetchStatus = useCallback(async () => {
         setView('loading');
         try {
-            const res = await fetchWithAuth('/teacher-attendance/status');
+            const query = lectureId ? `?lectureId=${lectureId}` : '';
+            const res = await fetchWithAuth(`/teacher-attendance/status${query}`);
             if (res.success) {
                 const data: StatusData = res.data;
                 setStatusData(data);
-                setView(data.marked ? 'already_marked' : 'hub');
+                // Per-lecture check: only block if THIS lecture is already marked
+                // If no lectureId, allow marking (teacher can always mark for a new lecture)
+                const alreadyDone = lectureId ? data.markedForLecture : false;
+                setView(alreadyDone ? 'already_marked' : 'hub');
             }
         } catch {
             toast.error('Failed to check attendance status');
             onClose();
         }
-    }, [onClose]);
+    }, [onClose, lectureId]);
 
     useEffect(() => {
         if (isOpen) {
@@ -169,10 +180,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     const capturePhoto = useCallback(() => {
         const img = webcamRef.current?.getScreenshot();
         if (img) {
-            // Flash shutter blink effect
-            setFlashActive(true);
-            setTimeout(() => setFlashActive(false), 350);
-            setTimeout(() => setCapturedImage(img), 80);
+            setCapturedImage(img);
         }
     }, []);
 
@@ -225,7 +233,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
         try {
             const res = await fetchWithAuth('/teacher-attendance/mark', {
                 method: 'POST',
-                body: JSON.stringify({ faceImage: capturedImage }),
+                body: JSON.stringify({ faceImage: capturedImage, ...(lectureId ? { lectureId } : {}) }),
             });
             if (res.success) {
                 setView('success');
@@ -237,10 +245,13 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
             const msg = err instanceof Error ? err.message : 'An error occurred';
             if (msg.includes('already marked')) {
                 setView('already_marked');
-                toast('Already marked for today!', { icon: 'ðŸ“‹' });
-            } else if (msg.includes('not registered') || msg.includes('Face not registered')) {
-                toast.error('Face not registered. Please register first.');
+                toast('Already marked for today!', { icon: '📋' });
+                fetchStatus();
+            } else if (msg.includes('not registered') || msg.includes('Face not registered') || msg.includes('invalid or corrupted')) {
+                setStatusData(prev => prev ? { ...prev, faceRegistered: false } : prev);
+                setCapturedImage(null);
                 setView('hub');
+                toast.error('Face not registered or corrupted — please re-register.', { duration: 5000 });
             } else {
                 setCapturedImage(null);
                 setView('scan_face');
@@ -255,6 +266,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
         try {
             const body: Record<string, string> = { faceImage: capturedImage };
             if (audioBase64) body.voiceAudio = audioBase64;
+            if (lectureId) body.lectureId = lectureId;
             const res = await fetchWithAuth('/teacher-attendance/mark', {
                 method: 'POST',
                 body: JSON.stringify(body),
@@ -284,9 +296,11 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
             });
             if (res.success) {
                 toast.success('🎉 Face registered! You can now mark attendance by scanning your face.');
-                setView('hub');
                 setCapturedImage(null);
-                // Refresh status so faceRegistered flag updates
+                // Immediately update local statusData so the hub re-renders without Register Face card
+                setStatusData(prev => prev ? { ...prev, faceRegistered: true } : prev);
+                setView('hub');
+                // Also re-fetch in background to get fully updated data
                 fetchStatus();
             }
         } catch (err: unknown) {
@@ -323,54 +337,39 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     }) => (
         <div className="space-y-5">
             <div className="relative w-full aspect-video rounded-3xl overflow-hidden bg-black/60 border border-white/10">
-                {/* Flash / shutter blink overlay */}
-                <AnimatePresence>
-                    {flashActive && (
-                        <motion.div
-                            key="cam-flash"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            transition={{ duration: 0.08 }}
-                            className="absolute inset-0 bg-white z-20 pointer-events-none"
-                        />
-                    )}
-                </AnimatePresence>
-                {!capturedImage ? (
-                    <>
-                        {cameraError ? (
-                            <div className="flex flex-col items-center justify-center h-full space-y-3">
-                                <AlertTriangle className="w-10 h-10 text-amber-400" />
-                                <p className="text-sm text-white/50">Camera access denied</p>
+                {/* Webcam always mounted — hidden when photo captured */}
+                <div style={{ display: capturedImage ? 'none' : 'block' }} className="w-full h-full">
+                    {cameraError ? (
+                        <div className="flex flex-col items-center justify-center h-full space-y-3">
+                            <AlertTriangle className="w-10 h-10 text-amber-400" />
+                            <p className="text-sm text-white/50">Camera access denied</p>
+                        </div>
+                    ) : (
+                        <>
+                            <Webcam
+                                ref={webcamRef}
+                                audio={false}
+                                screenshotFormat="image/jpeg"
+                                screenshotQuality={0.92}
+                                forceScreenshotSourceSize
+                                videoConstraints={{ facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }}
+                                onUserMediaError={() => setCameraError(true)}
+                                className="w-full h-full object-cover"
+                                mirrored
+                            />
+                            {/* Face oval guide — static, no pulse */}
+                            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                                <div className="w-44 h-56 border-2 border-dashed border-blue-400/40 rounded-[100%]" />
                             </div>
-                        ) : (
-                            <>
-                                <Webcam
-                                    ref={webcamRef}
-                                    audio={false}
-                                    screenshotFormat="image/jpeg"
-                                    videoConstraints={{ facingMode: 'user' }}
-                                    onUserMediaError={() => setCameraError(true)}
-                                    className="w-full h-full object-cover"
-                                />
-                                {/* Face oval guide */}
-                                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                                    <div className="w-44 h-56 border-2 border-dashed border-indigo-400/60 rounded-[100%] animate-pulse" />
-                                </div>
-                                {/* Scan line */}
-                                <motion.div
-                                    className="absolute left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-indigo-400 to-transparent opacity-70"
-                                    animate={{ top: ['20%', '80%', '20%'] }}
-                                    transition={{ duration: 2.5, repeat: Infinity, ease: 'linear' }}
-                                    style={{ position: 'absolute' }}
-                                />
-                                <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/60 to-transparent text-center">
-                                    <p className="text-xs text-white/60 font-medium">Center your face in the oval</p>
-                                </div>
-                            </>
-                        )}
-                    </>
-                ) : (
+                            <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/60 to-transparent text-center">
+                                <p className="text-xs text-white/60 font-medium">Center your face in the oval</p>
+                            </div>
+                        </>
+                    )}
+                </div>
+
+                {/* Captured image preview */}
+                {capturedImage && (
                     <>
                         <img src={capturedImage} alt="captured" className="w-full h-full object-cover" />
                         <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center">
@@ -386,7 +385,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                 <button
                     onClick={capturePhoto}
                     disabled={cameraError}
-                    className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white py-4 rounded-2xl font-bold transition-all shadow-lg shadow-indigo-500/20"
+                    className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white py-4 rounded-2xl font-bold transition-colors shadow-lg shadow-blue-500/20"
                 >
                     <Camera className="w-5 h-5" />
                     <span>Capture Face</span>
@@ -395,7 +394,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                 <div className="flex gap-3">
                     <button
                         onClick={retakePhoto}
-                        className="flex-1 py-4 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 font-bold text-sm transition-all"
+                        className="flex-1 py-4 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 font-bold text-sm transition-colors"
                     >
                         Retake
                     </button>
@@ -507,50 +506,68 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                                 </div>
                                             </div>
 
-                                            {/* Option cards */}
+                                            {/* Option cards — filtered by registration status */}
                                             <div className="grid grid-cols-1 gap-3 pt-1">
-                                                {OPTIONS.map((opt, i) => {
-                                                    const Icon = opt.icon;
-                                                    return (
-                                                        <motion.button
-                                                            key={opt.id}
-                                                            initial={{ opacity: 0, y: 18 }}
-                                                            animate={{ opacity: 1, y: 0 }}
-                                                            transition={{ delay: i * 0.07, type: 'spring', stiffness: 280, damping: 24 }}
-                                                            whileHover={{ scale: 1.02, y: -2 }}
-                                                            whileTap={{ scale: 0.98 }}
-                                                            onClick={() => {
-                                                                setCapturedImage(null);
-                                                                setCameraError(false);
-                                                                resetVoice();
-                                                                setView(opt.id);
-                                                            }}
-                                                            className={`group relative w-full flex items-center gap-5 p-5 rounded-[24px] border ${opt.border} ${opt.bg} hover:border-white/20 transition-all duration-300 shadow-lg ${opt.glow} hover:shadow-xl text-left overflow-hidden`}
-                                                        >
-                                                            {/* Gradient shimmer */}
-                                                            <div className={`absolute inset-0 bg-gradient-to-r ${opt.gradient} opacity-0 group-hover:opacity-5 transition-opacity duration-300 rounded-[24px]`} />
+                                                {ALL_OPTIONS
+                                                    .filter(opt => {
+                                                        if (opt.showWhen === 'face_not_registered') return !statusData?.faceRegistered;
+                                                        if (opt.showWhen === 'voice_registered') return !!statusData?.voiceRegistered;
+                                                        return true; // 'always'
+                                                    })
+                                                    .map((opt, i) => {
+                                                        const Icon = opt.icon;
+                                                        return (
+                                                            <motion.button
+                                                                key={opt.id}
+                                                                initial={{ opacity: 0, y: 18 }}
+                                                                animate={{ opacity: 1, y: 0 }}
+                                                                transition={{ delay: i * 0.07, type: 'spring', stiffness: 280, damping: 24 }}
+                                                                whileHover={{ scale: 1.02, y: -2 }}
+                                                                whileTap={{ scale: 0.98 }}
+                                                                onClick={() => {
+                                                                    setCapturedImage(null);
+                                                                    setCameraError(false);
+                                                                    resetVoice();
+                                                                    setView(opt.id);
+                                                                }}
+                                                                className={`group relative w-full flex items-center gap-5 p-5 rounded-[24px] border ${opt.border} ${opt.bg} hover:border-white/20 transition-all duration-300 shadow-lg ${opt.glow} hover:shadow-xl text-left overflow-hidden`}
+                                                            >
+                                                                {/* Gradient shimmer */}
+                                                                <div className={`absolute inset-0 bg-gradient-to-r ${opt.gradient} opacity-0 group-hover:opacity-5 transition-opacity duration-300 rounded-[24px]`} />
 
-                                                            {/* Icon bubble */}
-                                                            <div className={`relative shrink-0 w-14 h-14 rounded-2xl ${opt.bg} border ${opt.border} flex items-center justify-center`}>
-                                                                <Icon className={`w-7 h-7 ${opt.iconColor}`} />
-                                                            </div>
+                                                                {/* Icon bubble */}
+                                                                <div className={`relative shrink-0 w-14 h-14 rounded-2xl ${opt.bg} border ${opt.border} flex items-center justify-center`}>
+                                                                    <Icon className={`w-7 h-7 ${opt.iconColor}`} />
+                                                                </div>
 
-                                                            {/* Text */}
-                                                            <div className="flex-1 min-w-0">
-                                                                <p className="font-black text-base text-white">{opt.label}</p>
-                                                                <p className="text-xs text-white/40 mt-0.5">{opt.subtitle}</p>
-                                                            </div>
+                                                                {/* Text */}
+                                                                <div className="flex-1 min-w-0">
+                                                                    <p className="font-black text-base text-white">{opt.label}</p>
+                                                                    <p className="text-xs text-white/40 mt-0.5">{opt.subtitle}</p>
+                                                                </div>
 
-                                                            {/* Arrow indicator */}
-                                                            <div className={`shrink-0 w-8 h-8 rounded-xl ${opt.bg} border ${opt.border} flex items-center justify-center group-hover:translate-x-1 transition-transform`}>
-                                                                <svg className={`w-4 h-4 ${opt.iconColor}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                                                                </svg>
-                                                            </div>
-                                                        </motion.button>
-                                                    );
-                                                })}
+                                                                {/* Arrow indicator */}
+                                                                <div className={`shrink-0 w-8 h-8 rounded-xl ${opt.bg} border ${opt.border} flex items-center justify-center group-hover:translate-x-1 transition-transform`}>
+                                                                    <svg className={`w-4 h-4 ${opt.iconColor}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                                                                    </svg>
+                                                                </div>
+                                                            </motion.button>
+                                                        );
+                                                    })}
                                             </div>
+
+                                            {/* Re-register face link (shown only when face IS registered) */}
+                                            {statusData?.faceRegistered && (
+                                                <div className="pt-1 text-center">
+                                                    <button
+                                                        onClick={() => { setCapturedImage(null); setCameraError(false); setView('register_face'); }}
+                                                        className="text-[11px] text-white/25 hover:text-violet-400 transition-colors underline underline-offset-2"
+                                                    >
+                                                        Re-register face
+                                                    </button>
+                                                </div>
+                                            )}
                                         </motion.div>
                                     )}
 
@@ -857,6 +874,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
 };
 
 export default TeacherAttendanceModal;
+
 
 
 

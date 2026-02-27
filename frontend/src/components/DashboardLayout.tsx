@@ -65,11 +65,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         className="glass-card border-r border-white/5 h-screen sticky top-0 z-50 flex flex-col pt-8"
       >
         <div className="px-6 mb-12 flex items-center space-x-3">
-          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center shrink-0">
+          <div className="w-10 h-10 bg-gradient-to-br from-accent via-secondary to-primary rounded-xl flex items-center justify-center shrink-0">
             <ShieldCheck className="text-white w-6 h-6" />
           </div>
           {isSidebarOpen && (
-            <span className="font-bold text-xl tracking-tighter">SECURE.IO</span>
+            <span className="font-bold text-xl tracking-tighter text-gradient-static">ATTEND.AI</span>
           )}
         </div>
 
@@ -78,7 +78,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <button
               key={idx}
               onClick={() => router.push(item.href)}
-              className={`w-full flex items-center p-3 rounded-xl transition-all ${pathname === item.href ? 'bg-primary text-white' : 'text-white/40 hover:bg-white/5'
+              className={`w-full flex items-center p-3 rounded-xl transition-all ${pathname === item.href ? 'bg-gradient-to-r from-accent/20 via-secondary/10 to-primary/20 text-white border border-accent/20' : 'text-white/40 hover:bg-white/5'
                 }`}
             >
               <span className="shrink-0">{item.icon}</span>
@@ -110,7 +110,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <Bell className="w-5 h-5" />
               <div className="absolute top-3 right-3 w-2 h-2 bg-accent rounded-full border-2 border-background"></div>
             </button>
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-primary to-secondary p-[1px]">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-accent via-secondary to-primary p-[1px]">
               <div className="w-full h-full bg-background rounded-[11px] flex items-center justify-center font-bold">
                 {user?.fullName?.charAt(0)}
               </div>
