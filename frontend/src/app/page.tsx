@@ -8,7 +8,7 @@ import { ShieldCheck, Users, Clock, Zap, ArrowRight, Camera, Mic } from 'lucide-
 export default function Home() {
   const containerVariants = {
     hidden: { opacity: 0 },
-    visible: { 
+    visible: {
       opacity: 1,
       transition: { staggerChildren: 0.2 }
     }
@@ -21,17 +21,17 @@ export default function Home() {
 
   const features = [
     {
-      icon: <Camera className="w-6 h-6 text-primary" />,
+      icon: <Camera className="w-6 h-6 text-blue-400" />,
       title: "Face Recognition",
       desc: "Instant identity verification for students via mobile camera."
     },
     {
-      icon: <Mic className="w-6 h-6 text-secondary" />,
+      icon: <Mic className="w-6 h-6 text-red-400" />,
       title: "Anti-Deepfake Voice",
       desc: "Teacher authentication using dynamic sentence challenges."
     },
     {
-      icon: <Clock className="w-6 h-6 text-accent" />,
+      icon: <Clock className="w-6 h-6 text-amber-400" />,
       title: "Real-time Tracking",
       desc: "Monitor entry/exit times and total session duration automatically."
     }
@@ -40,18 +40,19 @@ export default function Home() {
   return (
     <main className="min-h-screen relative overflow-hidden flex flex-col items-center justify-center p-6 sm:p-24">
       {/* Background Orbs */}
-      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/20 rounded-full blur-[120px] animate-pulse"></div>
-      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary/20 rounded-full blur-[120px] animate-pulse"></div>
+      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-amber-500/20 rounded-full blur-[120px] animate-pulse"></div>
+      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-red-500/20 rounded-full blur-[120px] animate-pulse"></div>
+      <div className="absolute top-[30%] right-[10%] w-[25%] h-[25%] bg-blue-500/15 rounded-full blur-[100px] animate-pulse-slow"></div>
 
-      <motion.div 
+      <motion.div
         variants={containerVariants}
         initial="hidden"
         animate="visible"
         className="max-w-5xl w-full z-10 text-center space-y-12"
       >
         <motion.div variants={itemVariants} className="space-y-4">
-          <div className="inline-flex items-center space-x-2 px-4 py-2 rounded-full glass-card border-white/10 text-primary text-sm font-semibold mb-4">
-            <Zap className="w-4 h-4 fill-primary" />
+          <div className="inline-flex items-center space-x-2 px-4 py-2 rounded-full glass-card border-white/10 text-amber-400 text-sm font-semibold mb-4">
+            <Zap className="w-4 h-4 fill-amber-400" />
             <span>AI-Powered Attendance System</span>
           </div>
           <h1 className="text-5xl sm:text-7xl font-extrabold tracking-tight leading-tight">
@@ -77,7 +78,7 @@ export default function Home() {
           </Link>
         </motion.div>
 
-        <motion.div 
+        <motion.div
           variants={itemVariants}
           className="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-12"
         >
@@ -98,11 +99,11 @@ export default function Home() {
           <div className="flex flex-wrap justify-center gap-12 opacity-40">
             <div className="flex items-center space-x-2 grayscale">
               <ShieldCheck className="w-6 h-6" />
-              <span className="font-bold text-xl tracking-tighter">SECURE.AI</span>
+              <span className="font-bold text-xl tracking-tighter">ATTEND.AI</span>
             </div>
             <div className="flex items-center space-x-2 grayscale">
               <Users className="w-6 h-6" />
-              <span className="font-bold text-xl tracking-tighter">CAMPUS.LOG</span>
+              <span className="font-bold text-xl tracking-tighter">CAMPUS.AI</span>
             </div>
           </div>
         </motion.div>

@@ -80,16 +80,10 @@ export default function TeacherProfilePage() {
     useEffect(() => { fetchUser(); }, [fetchUser]);
 
     // ── Camera helpers ──
-    const triggerFlash = () => {
-        setFlashActive(true);
-        setTimeout(() => setFlashActive(false), 350);
-    };
-
     const capturePhoto = useCallback(() => {
         const img = webcamRef.current?.getScreenshot();
         if (img) {
-            triggerFlash();
-            setTimeout(() => setCapturedImage(img), 80);
+            setCapturedImage(img);
         }
     }, []);
 
@@ -396,22 +390,9 @@ export default function TeacherProfilePage() {
 
                                     {/* Webcam */}
                                     <div className="relative w-full aspect-video rounded-3xl overflow-hidden bg-black/60 border border-white/10">
-                                        {/* Flash overlay */}
-                                        <AnimatePresence>
-                                            {flashActive && (
-                                                <motion.div
-                                                    key="flash"
-                                                    initial={{ opacity: 0 }}
-                                                    animate={{ opacity: 1 }}
-                                                    exit={{ opacity: 0 }}
-                                                    transition={{ duration: 0.08 }}
-                                                    className="absolute inset-0 bg-white z-20 pointer-events-none rounded-3xl"
-                                                />
-                                            )}
-                                        </AnimatePresence>
-
-                                        {!capturedImage ? (
-                                            cameraError ? (
+                                        {/* Webcam always mounted — hidden when photo captured */}
+                                        <div style={{ display: capturedImage ? 'none' : 'block' }} className="w-full h-full">
+                                            {cameraError ? (
                                                 <div className="flex flex-col items-center justify-center h-full gap-3">
                                                     <AlertTriangle className="w-10 h-10 text-amber-400" />
                                                     <p className="text-sm text-white/50">Camera access denied</p>
@@ -422,27 +403,26 @@ export default function TeacherProfilePage() {
                                                         ref={webcamRef}
                                                         audio={false}
                                                         screenshotFormat="image/jpeg"
-                                                        videoConstraints={{ facingMode: 'user' }}
+                                                        screenshotQuality={0.92}
+                                                        forceScreenshotSourceSize
+                                                        videoConstraints={{ facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }}
                                                         onUserMediaError={() => setCameraError(true)}
                                                         className="w-full h-full object-cover"
+                                                        mirrored
                                                     />
-                                                    {/* Face guide oval */}
+                                                    {/* Face guide oval — static */}
                                                     <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                                                        <div className="w-44 h-56 border-2 border-dashed border-violet-400/60 rounded-[100%] animate-pulse" />
+                                                        <div className="w-44 h-56 border-2 border-dashed border-violet-400/40 rounded-[100%]" />
                                                     </div>
-                                                    {/* Scan line */}
-                                                    <motion.div
-                                                        className="absolute left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-violet-400 to-transparent opacity-70"
-                                                        animate={{ top: ['20%', '80%', '20%'] }}
-                                                        transition={{ duration: 2.5, repeat: Infinity, ease: 'linear' }}
-                                                        style={{ position: 'absolute' }}
-                                                    />
                                                     <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/60 to-transparent text-center">
                                                         <p className="text-xs text-white/60 font-medium">Center your face in the oval</p>
                                                     </div>
                                                 </>
-                                            )
-                                        ) : (
+                                            )}
+                                        </div>
+
+                                        {/* Captured image preview */}
+                                        {capturedImage && (
                                             <>
                                                 <img src={capturedImage} alt="captured" className="w-full h-full object-cover" />
                                                 <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center">

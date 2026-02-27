@@ -29,7 +29,7 @@ export default function LoginPage() {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       });
-      
+
       const token = res.data?.accessToken;
       const loggedUser = res.data?.user;
 
@@ -94,7 +94,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center p-6 relative">
       <AnimatePresence mode="wait">
         {step === 'CREDENTIALS' && (
-          <motion.div 
+          <motion.div
             key="creds"
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -102,8 +102,8 @@ export default function LoginPage() {
             className="w-full max-w-md glass-card p-10 rounded-[40px] space-y-8"
           >
             <div className="text-center space-y-2">
-              <div className="mx-auto w-16 h-16 bg-primary/20 rounded-2xl flex items-center justify-center mb-4">
-                <ShieldCheck className="w-10 h-10 text-primary" />
+              <div className="mx-auto w-16 h-16 bg-gradient-to-br from-amber-500/20 via-red-500/20 to-blue-500/20 rounded-2xl flex items-center justify-center mb-4">
+                <ShieldCheck className="w-10 h-10 text-amber-400" />
               </div>
               <h1 className="text-3xl font-bold">Welcome Back</h1>
               <p className="text-white/50 text-sm">Secure biometric login portal</p>
@@ -113,8 +113,8 @@ export default function LoginPage() {
               <div className="space-y-4">
                 <div className="relative group">
                   <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/30 group-focus-within:text-primary transition-colors" />
-                  <input 
-                    type="email" 
+                  <input
+                    type="email"
                     placeholder="Institutional Email"
                     className="input-field pl-12"
                     required
@@ -124,8 +124,8 @@ export default function LoginPage() {
                 </div>
                 <div className="relative group">
                   <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/30 group-focus-within:text-primary transition-colors" />
-                  <input 
-                    type="password" 
+                  <input
+                    type="password"
                     placeholder="Password"
                     className="input-field pl-12"
                     required
@@ -135,8 +135,8 @@ export default function LoginPage() {
                 </div>
               </div>
 
-              <button 
-                type="submit" 
+              <button
+                type="submit"
                 disabled={loading}
                 className="w-full btn-primary flex items-center justify-center space-x-2 py-4"
               >
@@ -154,7 +154,7 @@ export default function LoginPage() {
         )}
 
         {step === 'BIOMETRIC_FACE' && (
-          <motion.div 
+          <motion.div
             key="face"
             initial={{ opacity: 0, x: 50 }}
             animate={{ opacity: 1, x: 0 }}
@@ -167,11 +167,11 @@ export default function LoginPage() {
               </button>
               <div>
                 <h2 className="text-2xl font-bold flex items-center space-x-2">
-                  <Camera className="w-6 h-6 text-primary" />
+                  <Camera className="w-6 h-6 text-blue-400" />
                   <span>Face Authentication</span>
                 </h2>
                 <div className="flex space-x-1 mt-1">
-                  <div className="h-1 w-8 bg-primary rounded-full"></div>
+                  <div className="h-1 w-8 bg-amber-500 rounded-full"></div>
                   <div className="h-1 w-8 bg-white/10 rounded-full"></div>
                 </div>
               </div>
@@ -181,7 +181,7 @@ export default function LoginPage() {
         )}
 
         {step === 'BIOMETRIC_VOICE' && (
-          <motion.div 
+          <motion.div
             key="voice"
             initial={{ opacity: 0, x: 50 }}
             animate={{ opacity: 1, x: 0 }}
@@ -208,7 +208,7 @@ export default function LoginPage() {
         )}
 
         {step === 'SUCCESS' && (
-          <motion.div 
+          <motion.div
             key="success"
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -229,7 +229,7 @@ export default function LoginPage() {
             </div>
             <div className="pt-4">
               <div className="w-full bg-white/5 h-1.5 rounded-full overflow-hidden">
-                <motion.div 
+                <motion.div
                   initial={{ width: 0 }}
                   animate={{ width: '100%' }}
                   transition={{ duration: 1.5 }}

@@ -19,7 +19,10 @@ export async function fetchWithAuth(endpoint: string, options: RequestInit = {})
 
     if (!response.ok) {
         const error = await response.json().catch(() => ({ message: 'An error occurred' }));
-        throw new Error(error.message || 'An error occurred');
+        const err = new Error(error.message || 'An error occurred') as any;
+        err.data = error.data || {};
+        err.status = response.status;
+        throw err;
     }
 
     return response.json();

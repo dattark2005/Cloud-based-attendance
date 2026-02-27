@@ -46,9 +46,9 @@ export default function TeacherDashboard() {
   const totalStudents = sections.reduce((acc, curr) => acc + (curr.students?.length || 0), 0);
 
   const stats = [
-    { label: 'Total Students', value: totalStudents.toString(), icon: <Users className="text-primary" />, trend: 'Enrolled' },
-    { label: 'My Classrooms', value: sections.length.toString(), icon: <LayoutGrid className="text-secondary" />, trend: 'Active' },
-    { label: 'Live Sessions', value: activeSessions.length.toString(), icon: <Clock className="text-accent" />, trend: 'Active Now' },
+    { label: 'Total Students', value: totalStudents.toString(), icon: <Users className="text-blue-400" />, trend: 'Enrolled' },
+    { label: 'My Classrooms', value: sections.length.toString(), icon: <LayoutGrid className="text-red-400" />, trend: 'Active' },
+    { label: 'Live Sessions', value: activeSessions.length.toString(), icon: <Clock className="text-amber-400" />, trend: 'Active Now' },
     { label: 'Avg Attendance', value: '0%', icon: <Activity className="text-emerald-500" />, trend: 'N/A' },
   ];
 
@@ -108,13 +108,13 @@ export default function TeacherDashboard() {
           initial={{ opacity: 0, y: -6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.3 }}
-          className="flex items-center gap-4 p-5 rounded-[24px] bg-indigo-500/8 border border-indigo-500/20"
+          className="flex items-center gap-4 p-5 rounded-[24px] bg-amber-500/8 border border-amber-500/20"
         >
-          <div className="p-2.5 rounded-xl bg-indigo-500/15 shrink-0">
-            <CheckCircle2 className="w-5 h-5 text-indigo-400" />
+          <div className="p-2.5 rounded-xl bg-amber-500/15 shrink-0">
+            <CheckCircle2 className="w-5 h-5 text-amber-400" />
           </div>
           <div>
-            <p className="text-sm font-bold text-indigo-300">Attendance is managed inside each classroom</p>
+            <p className="text-sm font-bold text-amber-300">Attendance is managed inside each classroom</p>
             <p className="text-xs text-white/40">Click on any classroom card below → go to its detail page → mark your attendance or schedule lectures there.</p>
           </div>
         </motion.div>

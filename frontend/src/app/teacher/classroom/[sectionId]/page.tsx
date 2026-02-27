@@ -96,6 +96,7 @@ export default function ClassroomDetailPage({ params }: { params: Promise<{ sect
     const [attendanceInitialView, setAttendanceInitialView] = useState<AttendanceView>(null);
     const [attendanceMarked, setAttendanceMarked] = useState<boolean | null>(null);
     const [attendanceMarkedAt, setAttendanceMarkedAt] = useState<string | null>(null);
+    const [selectedLectureId, setSelectedLectureId] = useState<string | null>(null);
 
     /* Schedule lecture modal */
     const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
@@ -154,8 +155,9 @@ export default function ClassroomDetailPage({ params }: { params: Promise<{ sect
         checkAttendanceStatus();
     }, [loadSection, loadLectures, checkAttendanceStatus]);
 
-    const openAttendanceModal = (view: AttendanceView = null) => {
+    const openAttendanceModal = (view: AttendanceView = null, lectureId: string | null = null) => {
         setAttendanceInitialView(view);
+        setSelectedLectureId(lectureId);
         setIsAttendanceModalOpen(true);
     };
 
@@ -441,6 +443,15 @@ export default function ClassroomDetailPage({ params }: { params: Promise<{ sect
                                             <span className={`text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-full border ${getStatusColor(lecture.status)}`}>
                                                 {lecture.status}
                                             </span>
+                                            {(lecture.status === 'ONGOING' || lecture.status === 'SCHEDULED') && (
+                                                <button
+                                                    onClick={() => openAttendanceModal('scan_face', lecture._id)}
+                                                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all text-xs font-bold text-emerald-400"
+                                                >
+                                                    <Scan className="w-3.5 h-3.5" />
+                                                    Mark
+                                                </button>
+                                            )}
                                             <button
                                                 onClick={() => handleCancelLecture(lecture._id)}
                                                 className="p-2 rounded-xl bg-red-500/5 hover:bg-red-500/15 border border-red-500/10 hover:border-red-500/30 transition-all"
@@ -546,12 +557,14 @@ export default function ClassroomDetailPage({ params }: { params: Promise<{ sect
                 onClose={() => {
                     setIsAttendanceModalOpen(false);
                     setAttendanceInitialView(null);
+                    setSelectedLectureId(null);
                 }}
                 onSuccess={() => {
                     setAttendanceMarked(true);
                     setAttendanceMarkedAt(new Date().toISOString());
                 }}
                 initialView={attendanceInitialView}
+                lectureId={selectedLectureId}
             />
 
             <ScheduleLectureModal

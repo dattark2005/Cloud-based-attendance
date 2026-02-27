@@ -1,17 +1,18 @@
 @import "tailwindcss";
 
 :root {
-  --background: #050508;
+  --background: #0a0a12;
   --foreground: #f8fafc;
   
-  --primary: #6366f1;
-  --primary-glow: rgba(99, 102, 241, 0.4);
+  /* Yellow / Red / Blue gradient theme */
+  --primary: #3b82f6;        /* Vibrant Blue */
+  --primary-glow: rgba(59, 130, 246, 0.4);
   
-  --secondary: #a855f7;
-  --secondary-glow: rgba(168, 85, 247, 0.4);
+  --secondary: #ef4444;       /* Vivid Red */
+  --secondary-glow: rgba(239, 68, 68, 0.4);
   
-  --accent: #f43f5e;
-  --accent-glow: rgba(244, 63, 94, 0.4);
+  --accent: #f59e0b;          /* Warm Yellow/Amber */
+  --accent-glow: rgba(245, 158, 11, 0.4);
   
   --glass: rgba(255, 255, 255, 0.03);
   --glass-border: rgba(255, 255, 255, 0.08);
@@ -27,6 +28,7 @@
   
   --animate-pulse-slow: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   --animate-float: float 6s ease-in-out infinite;
+  --animate-gradient: gradient-shift 8s ease infinite;
 }
 
 @keyframes float {
@@ -34,12 +36,24 @@
   50% { transform: translateY(-20px); }
 }
 
+@keyframes gradient-shift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
 body {
   background-color: var(--background);
   color: var(--foreground);
   background-image: 
-    radial-gradient(circle at 20% 20%, rgba(99, 102, 241, 0.15) 0%, transparent 40%),
-    radial-gradient(circle at 80% 80%, rgba(168, 85, 247, 0.15) 0%, transparent 40%);
+    radial-gradient(circle at 15% 15%, rgba(245, 158, 11, 0.12) 0%, transparent 35%),
+    radial-gradient(circle at 85% 20%, rgba(239, 68, 68, 0.10) 0%, transparent 35%),
+    radial-gradient(circle at 50% 80%, rgba(59, 130, 246, 0.12) 0%, transparent 40%);
   background-attachment: fixed;
   min-height: 100vh;
   overflow-x: hidden;
@@ -69,6 +83,17 @@ body {
     box-shadow: 0 6px 20px 0 var(--primary-glow);
   }
 
+  .btn-accent {
+    @apply relative px-6 py-3 rounded-xl font-semibold transition-all duration-300;
+    background: linear-gradient(135deg, var(--accent), var(--secondary));
+    box-shadow: 0 4px 15px 0 var(--accent-glow);
+  }
+
+  .btn-accent:hover {
+    @apply scale-105;
+    box-shadow: 0 6px 20px 0 var(--accent-glow);
+  }
+
   .btn-secondary {
     @apply relative px-6 py-3 rounded-xl font-semibold transition-all duration-300;
     background: var(--glass);
@@ -84,6 +109,34 @@ body {
   }
   
   .text-gradient {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary via-secondary to-accent font-bold;
+    @apply bg-clip-text text-transparent font-bold;
+    background-image: linear-gradient(135deg, var(--accent), var(--secondary), var(--primary));
+    background-size: 200% auto;
+    animation: gradient-shift 6s ease infinite;
+  }
+
+  .text-gradient-static {
+    @apply bg-clip-text text-transparent font-bold;
+    background-image: linear-gradient(135deg, var(--accent), var(--secondary), var(--primary));
+  }
+
+  /* Glowing border effect for active cards */
+  .glow-border {
+    border: 1px solid transparent;
+    background-image: linear-gradient(var(--background), var(--background)),
+                      linear-gradient(135deg, var(--accent), var(--secondary), var(--primary));
+    background-origin: border-box;
+    background-clip: padding-box, border-box;
+  }
+
+  /* Status indicators */
+  .status-active {
+    @apply relative;
+  }
+  .status-active::before {
+    content: '';
+    @apply absolute top-1 right-1 w-3 h-3 rounded-full bg-emerald-500;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+    animation: glow-pulse 2s ease-in-out infinite;
   }
 }

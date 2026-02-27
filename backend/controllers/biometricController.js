@@ -39,30 +39,21 @@ const registerUserFace = async (req, res, next) => {
       : `data:image/jpeg;base64,${imagesToProcess[0]}`;
 
     // ── 1. Try Python face recognition service ──
-    let faceEncoding = null;
+    // NOTE: Python's /register-face stores the real 128-float SFace encoding directly
+    // in MongoDB itself. Do NOT overwrite faceEncoding from Node.js — that would
+    // corrupt the real float64 array with a plain text string, causing /verify-face
+    // to crash with a NumPy 500 error.
     let usedMock = false;
 
     try {
-      let faceResult;
       if (imageBuffers.length > 1) {
-        faceResult = await batchRegisterFace(userId.toString(), imageBuffers);
+        await batchRegisterFace(userId.toString(), imageBuffers);
       } else {
-        faceResult = await registerFace(userId.toString(), imageBuffers[0]);
+        await registerFace(userId.toString(), imageBuffers[0]);
       }
-
-      // Python returned an encoding — store it
-      if (faceResult.encoding) {
-        faceEncoding = Buffer.from(JSON.stringify(faceResult.encoding));
-      } else {
-        // No encoding returned but no error — use a marker
-        faceEncoding = Buffer.from('python_registered');
-      }
-
       console.log('✅ Python face service: face registered successfully');
     } catch (serviceError) {
       console.warn('⚠️  Python AI service unavailable. Using local registration fallback.');
-      // Fallback encoding — a fixed marker so we know it was registered locally
-      faceEncoding = Buffer.from('local_registered');
       usedMock = true;
     }
 
@@ -76,13 +67,26 @@ const registerUserFace = async (req, res, next) => {
       console.warn('⚠️  Cloudinary upload failed, face stored locally only:', cloudErr.message);
     }
 
-    // ── 3. Save to MongoDB — ALWAYS save the raw image bytes ──
-    await User.findByIdAndUpdate(userId, {
-      faceEncoding,               // Python encoding or marker
-      faceImageData: primaryBuffer, // ← Raw JPEG bytes for local comparison
-      faceImageUrl: imageUrl,     // Cloudinary URL (may be null)
+    // ── 3. Save to MongoDB ──
+    // Only update image fields and registration timestamp.
+    // faceEncoding is written by the Python service directly — do not touch it here.
+    const updateFields = {
+      faceImageData: primaryBuffer, // Raw JPEG for local fallback comparison
+      faceImageUrl: imageUrl,
       faceRegisteredAt: new Date(),
-    });
+    };
+    // If Python was unavailable, set a local marker ONLY if no real encoding exists yet
+    if (usedMock) {
+      updateFields.$setOnInsert = {}; // don't overwrite if already set
+      // Use $set for faceEncoding only if it's not already a real 128-float array
+      const existingUser = await User.findById(userId).select('+faceEncoding');
+      const existingEnc = existingUser?.faceEncoding;
+      const hasRealEncoding = existingEnc && existingEnc.length === 1024; // 128 * float64 (8 bytes) — works for both dlib and SFace
+      if (!hasRealEncoding) {
+        updateFields.faceEncoding = Buffer.from('local_registered');
+      }
+    }
+    await User.findByIdAndUpdate(userId, updateFields);
 
     console.log(`✅ Face registration saved to DB for user ${userId} (mock=${usedMock})`);
 

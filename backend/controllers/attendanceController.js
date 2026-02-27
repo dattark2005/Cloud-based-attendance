@@ -78,33 +78,28 @@ const createAttendanceRequest = async (req, res, next) => {
 /**
  * Mark attendance
  * POST /api/attendance/mark
+ * No longer requires a pre-created AttendanceRequest.
+ * Instead, checks that the lecture is ONGOING or SCHEDULED (live session).
  */
 const markAttendance = async (req, res, next) => {
   try {
     const { lectureId, faceImage, location } = req.body;
     const studentId = req.user._id;
 
-    // Find active attendance request
-    const attendanceRequest = await AttendanceRequest.findOne({
-      lectureId,
-      status: REQUEST_STATUS.ACTIVE,
-    });
-
-    if (!attendanceRequest) {
-      return res.status(404).json({
-        success: false,
-        message: 'No active attendance request found for this lecture',
-      });
+    if (!lectureId) {
+      return res.status(400).json({ success: false, message: 'lectureId is required' });
     }
 
-    // Check if request has expired
-    if (attendanceRequest.isExpired()) {
-      attendanceRequest.status = REQUEST_STATUS.EXPIRED;
-      await attendanceRequest.save();
+    // Verify lecture exists and is part of a live session (ONGOING or SCHEDULED)
+    const lecture = await Lecture.findById(lectureId).populate('sectionId');
+    if (!lecture) {
+      return res.status(404).json({ success: false, message: 'Lecture not found' });
+    }
 
+    if (lecture.status !== LECTURE_STATUS.ONGOING && lecture.status !== LECTURE_STATUS.SCHEDULED) {
       return res.status(400).json({
         success: false,
-        message: 'Attendance request has expired',
+        message: `Cannot mark attendance — lecture is ${lecture.status}. Only ONGOING or SCHEDULED lectures accept attendance.`,
       });
     }
 
@@ -122,7 +117,6 @@ const markAttendance = async (req, res, next) => {
     }
 
     // Verify student is enrolled in the section
-    const lecture = await Lecture.findById(lectureId).populate('sectionId');
     if (!lecture.sectionId.students.includes(studentId)) {
       return res.status(403).json({
         success: false,
@@ -180,9 +174,6 @@ const markAttendance = async (req, res, next) => {
       }
 
       if (!verified) {
-        // ── PROXY ATTEMPT DETECTED ──────────────────────────────────────────
-        // The captured face does NOT match the registered face of the logged-in student.
-        // This fires when someone tries to mark attendance on behalf of another person.
         console.warn(
           `🚨 PROXY ATTEMPT: studentId=${studentId} | confidence=${(confidenceScore * 100).toFixed(1)}% | ip=${req.ip} | lectureId=${lectureId}`
         );
@@ -193,7 +184,6 @@ const markAttendance = async (req, res, next) => {
         });
       }
 
-      // Log successful biometric verification for audit
       console.log(`✅ Student face verified: studentId=${studentId}, confidence=${(confidenceScore * 100).toFixed(1)}%`);
     } catch (error) {
       console.error('Face verification error:', error);
@@ -227,8 +217,21 @@ const markAttendance = async (req, res, next) => {
       },
     });
 
-    // Add student to marked list
-    await attendanceRequest.markStudent(studentId);
+    // If an AttendanceRequest exists, update it (optional — not required)
+    const attendanceRequest = await AttendanceRequest.findOne({
+      lectureId,
+      status: REQUEST_STATUS.ACTIVE,
+    });
+    if (attendanceRequest) {
+      try { await attendanceRequest.markStudent(studentId); } catch { /* non-critical */ }
+    }
+
+    // Auto-set lecture to ONGOING if it was SCHEDULED
+    if (lecture.status === LECTURE_STATUS.SCHEDULED) {
+      lecture.status = LECTURE_STATUS.ONGOING;
+      lecture.actualStart = new Date();
+      await lecture.save();
+    }
 
     res.status(201).json({
       success: true,
