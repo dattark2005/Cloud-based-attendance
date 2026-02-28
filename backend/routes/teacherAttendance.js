@@ -5,6 +5,7 @@ const { ROLES } = require('../config/constants');
 const {
     getTodayStatus,
     markAttendance,
+    unmarkAttendance,
     getMyAttendance,
     registerFace,
     registerTeacherFace,
@@ -29,6 +30,9 @@ router.post(
     validate,
     markAttendance
 );
+
+// DELETE /api/teacher-attendance/unmark?lectureId=xxx
+router.delete('/unmark', unmarkAttendance);
 
 // POST /api/teacher-attendance/register-face
 router.post(

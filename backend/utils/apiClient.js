@@ -66,6 +66,44 @@ const identifyFace = async (imageBuffer) => {
   }
 };
 
+const identifyMultipleFaces = async (imageBuffer, enrolledStudentIds = []) => {
+  try {
+    const formData = new FormData();
+    formData.append('file', imageBuffer, { filename: 'classroom.jpg' });
+    // Pass the enrolled student IDs so Python ONLY searches among them
+    if (enrolledStudentIds.length > 0) {
+      formData.append('expected_user_ids', enrolledStudentIds.join(','));
+    }
+
+    const response = await axios.post(`${FACE_SERVICE_URL}/identify-group`, formData, {
+      headers: formData.getHeaders(),
+      timeout: 30000,
+    });
+
+    // /identify-group returns { identifiedCount, matches, totalFaces }
+    // Normalise to match what markClassroomAttendance expects
+    const data = response.data;
+    return {
+      identified: (data.identifiedCount || 0) > 0,
+      matches: data.matches || [],
+      totalDetected: data.totalFaces || 0,
+    };
+  } catch (error) {
+    if (error.code === 'ECONNREFUSED' || error.message.includes('timeout')) {
+       console.warn('Face Service Unavailable');
+       return { identified: false, matches: [], reason: 'Service unavailable' };
+    }
+    // Log the full Python response for debugging
+    if (error.response) {
+      console.error('❌ Python service error:', error.response.status, JSON.stringify(error.response.data));
+    } else {
+      console.error('❌ Axios error (no response):', error.message, error.code);
+    }
+    // Return safe fallback instead of crashing the whole request
+    return { identified: false, matches: [], totalDetected: 0, error: error.response?.data?.detail || error.message };
+  }
+};
+
 const registerVoice = async (userId, audioBuffer) => {
   try {
     const formData = new FormData();
@@ -142,6 +180,7 @@ module.exports = {
   batchRegisterFace,
   verifyFace,
   identifyFace,
+  identifyMultipleFaces,
   registerVoice,
   verifyVoice,
 };

@@ -145,6 +145,18 @@ def detect_face(image_bgr: np.ndarray):
     return faces[best_idx]
 
 
+def detect_all_faces(image_bgr: np.ndarray):
+    """
+    Detect all faces using YuNet. Returns a list of all detected faces.
+    """
+    h, w = image_bgr.shape[:2]
+    face_detector.setInputSize((w, h))
+    _, faces = face_detector.detect(image_bgr)
+    if faces is None or len(faces) == 0:
+        return []
+    return faces
+
+
 def get_embedding(image_bgr: np.ndarray) -> np.ndarray:
     """
     Full pipeline: detect face → align → extract SFace embedding.
@@ -164,22 +176,32 @@ def get_embedding(image_bgr: np.ndarray) -> np.ndarray:
 
 def match_score(emb1: np.ndarray, emb2: np.ndarray) -> dict:
     """
-    Compare two embeddings using OpenCV's built-in matching.
-    Returns cosine score and L2 distance + match decision.
+    Compare two SFace embeddings using cosine similarity.
+    Uses pure numpy (not cv2.FaceRecognizerSF.match) so the result
+    is always a plain Python float — no numpy-array truth-value ambiguity.
     """
-    e1 = emb1.astype(np.float32).reshape(1, -1)
-    e2 = emb2.astype(np.float32).reshape(1, -1)
+    # Flatten to 1-D float32
+    v1 = emb1.astype(np.float32).flatten()
+    v2 = emb2.astype(np.float32).flatten()
 
-    cosine_score = face_recognizer.match(e1, e2, cv2.FaceRecognizerSF_FR_COSINE)
-    l2_distance = face_recognizer.match(e1, e2, cv2.FaceRecognizerSF_FR_NORM_L2)
+    # L2-normalise
+    n1 = float(np.linalg.norm(v1))
+    n2 = float(np.linalg.norm(v2))
+    if n1 == 0 or n2 == 0:
+        return {"cosine_score": 0.0, "l2_distance": 99.0, "is_match": False, "confidence": 0.0}
 
-    is_match = cosine_score >= COSINE_THRESHOLD
+    cosine_score = float(np.dot(v1 / n1, v2 / n2))   # guaranteed Python float in [-1, 1]
+
+    # L2 distance (for reference / logging only)
+    l2_distance = float(np.linalg.norm(v1 - v2))
+
+    is_match = cosine_score >= COSINE_THRESHOLD         # Python bool
 
     return {
-        "cosine_score": float(cosine_score),
-        "l2_distance": float(l2_distance),
+        "cosine_score": cosine_score,
+        "l2_distance": l2_distance,
         "is_match": is_match,
-        "confidence": float(cosine_score),
+        "confidence": cosine_score,
     }
 
 
@@ -454,6 +476,176 @@ async def identify_face_endpoint(file: UploadFile = File(...)):
 
     except Exception as e:
         logger.error(f"Identify error: {e}", exc_info=True)
+        raise HTTPException(500, detail=str(e))
+
+
+@app.post("/identify-multiple-faces")
+async def identify_multiple_faces_endpoint(
+    file: UploadFile = File(...),
+    expected_user_ids: str = Form(None)
+):
+    """Identify multiple persons from a group photo.
+    Optional: expected_user_ids = comma-separated MongoDB user IDs to restrict search.
+    """
+    try:
+        data = await file.read()
+        bgr = image_bytes_to_bgr(data)
+
+        faces = detect_all_faces(bgr)
+        if len(faces) == 0:
+            return {"identified": False, "matches": [], "totalDetected": 0, "reason": "No faces detected"}
+
+        # Filter users by expected IDs if provided
+        query = {"faceEncoding": {"$exists": True}}
+        if expected_user_ids:
+            ids_list = []
+            for uid in expected_user_ids.split(","):
+                uid = uid.strip()
+                if uid:
+                    try:
+                        ids_list.append(ObjectId(uid))
+                    except Exception:
+                        pass
+            if ids_list:
+                query["_id"] = {"$in": ids_list}
+                logger.info(f"Restricting search to {len(ids_list)} enrolled users")
+
+        users = await db.users.find(query).to_list(1000)
+        logger.info(f"identify-multiple-faces: {len(faces)} faces detected, {len(users)} users in DB pool")
+
+        # Pre-parse DB embeddings once
+        db_embeddings = []
+        for u in users:
+            raw = u['faceEncoding']
+            if hasattr(raw, 'read'):
+                raw = raw.read()
+            elif not isinstance(raw, (bytes, bytearray)):
+                raw = bytes(raw)
+            if len(raw) == 1024:
+                stored = np.frombuffer(raw, dtype=np.float64)
+                db_embeddings.append({"user_id": str(u["_id"]), "name": u.get("fullName"), "embedding": stored})
+
+        matches = []
+        for face in faces:
+            try:
+                aligned = face_recognizer.alignCrop(bgr, face)
+                current_emb = face_recognizer.feature(aligned).flatten().astype(np.float64)
+
+                best_user = None
+                best_score = 0
+
+                for db_user in db_embeddings:
+                    result = match_score(db_user["embedding"], current_emb)
+                    if result['is_match'] and result['cosine_score'] > best_score:
+                        best_score = result['cosine_score']
+                        best_user = db_user
+
+                if best_user:
+                    x, y, w, h = face[:4]
+                    matches.append({
+                        "userId": best_user["user_id"],
+                        "userName": best_user["name"],
+                        "confidence": float(best_score),
+                        "box": [float(x), float(y), float(w), float(h)]
+                    })
+                    logger.info(f"  ✅ Matched: {best_user['name']} ({best_user['user_id']}), conf={best_score:.3f}")
+                else:
+                    logger.info(f"  ❌ Face not matched to any enrolled user")
+            except Exception as e:
+                logger.warning(f"Error processing a face: {e}")
+                continue
+
+        return {
+            "identified": len(matches) > 0,
+            "matches": matches,
+            "totalDetected": len(faces)
+        }
+
+    except Exception as e:
+        logger.error(f"Identify multiple error: {e}", exc_info=True)
+        raise HTTPException(500, detail=str(e))
+
+
+@app.post("/identify-group")
+async def identify_group_endpoint(
+    file: UploadFile = File(...),
+    expected_user_ids: str = Form(None)
+):
+    """Identify multiple persons in a group photo. Optionally restrict to expected_user_ids."""
+    try:
+        data = await file.read()
+        bgr = image_bytes_to_bgr(data)
+
+        faces = detect_all_faces(bgr)
+        if len(faces) == 0:
+            return {"identifiedCount": 0, "matches": [], "totalFaces": 0}
+
+        query = {"faceEncoding": {"$exists": True}}
+        if expected_user_ids:
+            ids_list = []
+            for uid in expected_user_ids.split(","):
+                uid = uid.strip()
+                if uid:
+                    try:
+                        ids_list.append(ObjectId(uid))
+                    except Exception:
+                        pass
+            if ids_list:
+                query["_id"] = {"$in": ids_list}
+
+        users = await db.users.find(query).to_list(1000)
+        logger.info(f"identify-group: {len(faces)} faces, {len(users)} DB users in pool")
+
+        # Pre-parse embeddings
+        db_embeddings = []
+        for u in users:
+            raw = u.get('faceEncoding')
+            if raw is None:
+                continue
+            if hasattr(raw, 'read'): raw = raw.read()
+            elif not isinstance(raw, (bytes, bytearray)): raw = bytes(raw)
+            if len(raw) == 1024:
+                db_embeddings.append({
+                    "user_id": str(u["_id"]),
+                    "name": u.get("fullName", "Unknown"),
+                    "embedding": np.frombuffer(raw, dtype=np.float64).copy()  # .copy() avoids read-only numpy error
+                })
+
+        if not db_embeddings:
+            logger.warning("  No valid embeddings found in DB pool")
+            return {"identifiedCount": 0, "matches": [], "totalFaces": len(faces)}
+
+        matches = []
+        for face in faces:
+            try:
+                aligned = face_recognizer.alignCrop(bgr, face)
+                emb = face_recognizer.feature(aligned).flatten().astype(np.float64)
+                best_match = None
+                best_score = 0
+                for db_user in db_embeddings:
+                    result = match_score(db_user["embedding"], emb)
+                    if result['is_match'] and result['cosine_score'] > best_score:
+                        best_score = result['cosine_score']
+                        best_match = db_user
+                if best_match:
+                    box = [float(face[0]), float(face[1]), float(face[2]), float(face[3])]
+                    matches.append({
+                        "userId": best_match["user_id"],
+                        "userName": best_match["name"],
+                        "confidence": float(best_score),
+                        "box": box,
+                    })
+                    logger.info(f"  ✅ Match: {best_match['name']} ({best_match['user_id']}) conf={best_score:.3f}")
+                else:
+                    logger.info(f"  ❌ No match for detected face")
+            except Exception as face_err:
+                logger.warning(f"  Face processing error: {face_err}", exc_info=True)
+                continue
+
+        return {"identifiedCount": len(matches), "matches": matches, "totalFaces": len(faces)}
+
+    except Exception as e:
+        logger.error(f"Group identify error: {e}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 

@@ -860,6 +860,21 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                             <button onClick={onClose} className="w-full btn-primary py-4 font-black">
                                                 Done
                                             </button>
+                                            <button
+                                                onClick={async () => {
+                                                    try {
+                                                        const q = lectureId ? `?lectureId=${lectureId}` : '';
+                                                        await fetchWithAuth(`/teacher-attendance/unmark${q}`, { method: 'DELETE' });
+                                                        toast('Attendance reset. You can mark again.', { icon: '🔄' });
+                                                        fetchStatus();
+                                                    } catch {
+                                                        toast.error('Could not reset attendance');
+                                                    }
+                                                }}
+                                                className="w-full py-3 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-white/40 hover:text-white/60 transition-all font-medium"
+                                            >
+                                                Re-mark Attendance
+                                            </button>
                                         </motion.div>
                                     )}
 
