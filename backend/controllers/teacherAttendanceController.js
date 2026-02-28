@@ -153,8 +153,24 @@ const markAttendance = async (req, res, next) => {
 };
 
 /**
- * GET /api/teacher-attendance/my
+ * DELETE /api/teacher-attendance/unmark?lectureId=xxx
+ * Allows a teacher to reset their attendance for a specific lecture today.
  */
+const unmarkAttendance = async (req, res, next) => {
+    try {
+        const teacherId = req.user._id;
+        const { lectureId } = req.query;
+        const today = getTodayDateString();
+
+        const query = { teacherId, date: today };
+        if (lectureId) query.lectureId = lectureId;
+
+        const result = await TeacherAttendance.deleteMany(query);
+        res.json({ success: true, message: `Cleared ${result.deletedCount} attendance record(s)` });
+    } catch (error) {
+        next(error);
+    }
+};
 const getMyAttendance = async (req, res, next) => {
     try {
         const teacherId = req.user._id;
@@ -181,6 +197,7 @@ const registerFace = registerTeacherFace;
 module.exports = {
     getTodayStatus,
     markAttendance,
+    unmarkAttendance,
     getMyAttendance,
     registerFace,
     registerTeacherFace,

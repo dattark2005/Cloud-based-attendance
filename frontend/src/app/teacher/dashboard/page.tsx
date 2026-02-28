@@ -103,21 +103,7 @@ export default function TeacherDashboard() {
           ))}
         </div>
 
-        {/* ─── Info banner: attendance lives inside classrooms ─── */}
-        <motion.div
-          initial={{ opacity: 0, y: -6 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-          className="flex items-center gap-4 p-5 rounded-[24px] bg-amber-500/8 border border-amber-500/20"
-        >
-          <div className="p-2.5 rounded-xl bg-amber-500/15 shrink-0">
-            <CheckCircle2 className="w-5 h-5 text-amber-400" />
-          </div>
-          <div>
-            <p className="text-sm font-bold text-amber-300">Attendance is managed inside each classroom</p>
-            <p className="text-xs text-white/40">Click on any classroom card below → go to its detail page → mark your attendance or schedule lectures there.</p>
-          </div>
-        </motion.div>
+
 
         {/* ── Classrooms Section ── */}
         <div className="space-y-6">
@@ -183,32 +169,7 @@ export default function TeacherDashboard() {
           )}
         </div>
 
-        {/* ── Infrastructure Health ── */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 pt-6">
-          <div className="glass-card p-10 rounded-[45px] space-y-6">
-            <h3 className="text-xl font-bold tracking-tight">Infrastructure Health</h3>
-            <div className="grid grid-cols-2 gap-6">
-              <div className="p-8 rounded-[35px] bg-emerald-500/5 border border-emerald-500/10 flex flex-col items-center justify-center space-y-3 text-center">
-                <div className="w-12 h-12 rounded-full border-2 border-emerald-500/20 border-t-emerald-500 animate-spin" />
-                <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Master Node</p>
-                <p className="text-xl font-black text-emerald-500">STABLE</p>
-              </div>
-              <div className="p-8 rounded-[35px] bg-white/5 border border-white/5 flex flex-col items-center justify-center space-y-3 text-center">
-                <CheckCircle2 className="w-12 h-12 text-primary" />
-                <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Biometric Hub</p>
-                <p className="text-xl font-black">ACTIVE</p>
-              </div>
-            </div>
-          </div>
 
-          <div className="glass-card p-10 rounded-[45px] flex flex-col justify-center items-center text-center space-y-6 bg-gradient-to-br from-primary/10 via-transparent to-transparent border-primary/10">
-            <Activity className="w-16 h-16 text-primary/40" />
-            <div className="space-y-2">
-              <h3 className="text-xl font-black italic text-white/60 tracking-tight">&quot;Engine optimized for high-density environments.&quot;</h3>
-              <p className="text-[8px] font-black text-primary uppercase tracking-[0.3em] pt-4">SYSTEM CORE V1.0.4</p>
-            </div>
-          </div>
-        </div>
 
       </div>
 

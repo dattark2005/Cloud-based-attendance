@@ -9,6 +9,8 @@ const {
   getAttendanceHistory,
   getAttendanceStatus,
   logActivity,
+  markClassroomAttendance,
+  updateStudentAttendance,
 } = require('../controllers/attendanceController');
 
 // Activity logging (Entry/Exit)
@@ -31,6 +33,17 @@ router.post('/mark', isStudent, [
   body('lectureId').notEmpty().withMessage('Lecture ID is required'),
   body('faceImage').optional(),
 ], validate, markAttendance);
+
+// Mark classroom attendance (teachers only)
+router.post('/classroom-photo', isTeacher, [
+  body('lectureId').notEmpty().withMessage('Lecture ID is required'),
+  body('faceImage').notEmpty().withMessage('Classroom photo is required'),
+], validate, markClassroomAttendance);
+
+// Update specific student attendance (teachers only)
+router.put('/student/:studentId/lecture/:lectureId', isTeacher, [
+  body('status').isIn(['PRESENT', 'ABSENT', 'LATE']).withMessage('Invalid status')
+], validate, updateStudentAttendance);
 
 // Get attendance history (all authenticated users)
 router.get('/history', getAttendanceHistory);

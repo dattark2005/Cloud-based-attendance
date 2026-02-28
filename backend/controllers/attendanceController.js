@@ -5,7 +5,7 @@ const EntryExitLog = require('../models/EntryExitLog');
 const User = require('../models/User');
 const Section = require('../models/Section');
 const { uploadToCloudinary } = require('../config/cloudinary');
-const { verifyFace } = require('../utils/apiClient');
+const { verifyFace, identifyMultipleFaces } = require('../utils/apiClient');
 const { ATTENDANCE_STATUS, LECTURE_STATUS, REQUEST_STATUS, CLOUDINARY_FOLDERS, DEFAULTS } = require('../config/constants');
 
 /**
@@ -475,10 +475,136 @@ const logActivity = async (req, res, next) => {
   }
 };
 
+const markClassroomAttendance = async (req, res, next) => {
+  try {
+    const { lectureId, faceImage } = req.body;
+    const teacherId = req.user._id;
+
+    if (!lectureId || !faceImage) {
+      return res.status(400).json({ success: false, message: 'lectureId and faceImage are required' });
+    }
+
+    const lecture = await Lecture.findById(lectureId).populate('sectionId');
+    if (!lecture) return res.status(404).json({ success: false, message: 'Lecture not found' });
+
+    if (lecture.teacherId.toString() !== teacherId.toString()) {
+      return res.status(403).json({ success: false, message: 'Not authorized for this lecture' });
+    }
+
+    if (lecture.status !== LECTURE_STATUS.ONGOING && lecture.status !== LECTURE_STATUS.SCHEDULED) {
+      return res.status(400).json({ success: false, message: 'Lecture is not active' });
+    }
+
+    // Get enrolled student IDs as plain strings
+    const enrolledStudentIds = (lecture.sectionId.students || []).map(id => id.toString());
+    console.log(`📸 Classroom photo upload | lectureId=${lectureId} | enrolled=${enrolledStudentIds.length} students`);
+    console.log(`📋 Enrolled IDs: [${enrolledStudentIds.join(', ')}]`);
+
+    const base64Data = faceImage.replace(/^data:image\/\w+;base64,/, '');
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+
+    // Call Python — pass enrolled IDs so it only matches among them
+    const result = await identifyMultipleFaces(imageBuffer, enrolledStudentIds);
+    console.log(`🤖 Python identify-group result: totalDetected=${result.totalDetected}, matches=${JSON.stringify(result.matches?.map(m => ({ userId: m.userId, name: m.userName, conf: m.confidence?.toFixed(3) })))}`);
+
+    if (result.reason === 'Service unavailable' || result.error) {
+      const msg = result.error
+        ? `Face recognition error: ${result.error}`
+        : 'Face recognition service unavailable. Ensure the Python service is running.';
+       console.error('⛔ Face service error:', msg);
+       return res.status(503).json({ success: false, message: msg });
+    }
+
+    let markedCount = 0;
+    const newlyMarked = [];
+
+    if (result.matches && result.matches.length > 0) {
+      for (const match of result.matches) {
+        const studentId = match.userId;
+
+        // Safety check: only allow enrolled students (should already be filtered by Python)
+        if (!enrolledStudentIds.includes(studentId)) {
+          console.warn(`⚠️  Matched userId ${studentId} is not in enrolled list — skipping`);
+          continue;
+        }
+
+        const existingRecord = await AttendanceRecord.findOne({ lectureId, studentId });
+        if (!existingRecord) {
+           await AttendanceRecord.create({
+             lectureId,
+             studentId,
+             markedAt: new Date(),
+             status: ATTENDANCE_STATUS.PRESENT,
+             confidenceScore: match.confidence,
+             verificationMethod: 'FACE',
+           });
+           markedCount++;
+           newlyMarked.push(studentId);
+           console.log(`✅ Marked present: ${match.userName} (${studentId}), confidence=${(match.confidence * 100).toFixed(1)}%`);
+        } else {
+           console.log(`ℹ️  Already marked: ${match.userName} (${studentId})`);
+        }
+      }
+    }
+
+    console.log(`🏁 Done | marked ${markedCount} new students present`);
+
+    res.json({
+       success: true,
+       message: `Successfully marked ${markedCount} student${markedCount !== 1 ? 's' : ''} present.`,
+       data: {
+          totalDetected: result.totalDetected || 0,
+          markedCount,
+          newlyMarked,
+       }
+    });
+  } catch (error) {
+     console.error('markClassroomAttendance error:', error);
+     next(error);
+  }
+};
+
+const updateStudentAttendance = async (req, res, next) => {
+  try {
+    const { studentId, lectureId } = req.params;
+    const { status } = req.body; 
+
+    const lecture = await Lecture.findById(lectureId);
+    if (!lecture || lecture.teacherId.toString() !== req.user._id.toString()) {
+       return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    if (status === 'ABSENT') {
+       await AttendanceRecord.findOneAndDelete({ lectureId, studentId });
+       return res.json({ success: true, message: 'Student marked absent' });
+    } else {
+       let record = await AttendanceRecord.findOne({ lectureId, studentId });
+       if (record) {
+          record.status = status;
+          record.verificationMethod = 'MANUAL';
+          await record.save();
+       } else {
+          await AttendanceRecord.create({
+             lectureId,
+             studentId,
+             markedAt: new Date(),
+             status,
+             verificationMethod: 'MANUAL'
+          });
+       }
+       return res.json({ success: true, message: `Student marked ${status}` });
+    }
+  } catch (error) {
+     next(error);
+  }
+};
+
 module.exports = {
   createAttendanceRequest,
   markAttendance,
   getAttendanceHistory,
   getAttendanceStatus,
   logActivity,
+  markClassroomAttendance,
+  updateStudentAttendance,
 };
