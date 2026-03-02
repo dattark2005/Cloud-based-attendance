@@ -23,6 +23,10 @@ const entryExitLogSchema = new mongoose.Schema({
     confidence: {
         type: Number,
     },
+    roomNumber: {
+        type: String,
+        index: true,
+    },
     faceImageUrl: {
         type: String,
     }

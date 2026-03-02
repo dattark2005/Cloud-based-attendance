@@ -137,7 +137,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     const timerRef = useRef<NodeJS.Timeout | null>(null);
 
     /* ─── Fetch today's status (per-lecture when lectureId provided) ─── */
-    const fetchStatus = useCallback(async () => {
+    const fetchStatus = useCallback(async (): Promise<boolean> => {
         setView('loading');
         try {
             const query = lectureId ? `?lectureId=${lectureId}` : '';
@@ -145,18 +145,27 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
             if (res.success) {
                 const data: StatusData = res.data;
                 setStatusData(data);
+
                 // Per-lecture check: only block if THIS lecture is already marked
-                // If no lectureId, allow marking (teacher can always mark for a new lecture)
-                const alreadyDone = lectureId ? data.markedForLecture : false;
-                setView(alreadyDone ? 'already_marked' : 'hub');
+                const alreadyDone = lectureId ? data.markedForLecture : (data.marked && !lectureId);
+
+                // Set view but also return the status so caller can know immediately
+                if (alreadyDone) {
+                    setView('already_marked');
+                } else {
+                    setView('hub');
+                }
+                return alreadyDone;
             }
         } catch {
             toast.error('Failed to check attendance status');
             onClose();
         }
+        return false;
     }, [onClose, lectureId]);
 
     useEffect(() => {
+        let isMounted = true;
         if (isOpen) {
             setCapturedImage(null);
             setCameraError(false);
@@ -164,15 +173,16 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
             if (initialView) {
                 // Skip the hub and go directly to the requested view
                 setView('loading');
-                fetchStatus().then(() => {
-                    // fetchStatus sets view to 'hub' or 'already_marked';
-                    // override to the requested sub-view only if not already marked
-                    setView(prev => prev === 'hub' ? initialView : prev);
+                fetchStatus().then(alreadyMarked => {
+                    if (isMounted && !alreadyMarked) {
+                        setView(initialView);
+                    }
                 });
             } else {
                 fetchStatus();
             }
         }
+        return () => { isMounted = false; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, initialView]);
 
@@ -244,9 +254,12 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'An error occurred';
             if (msg.includes('already marked')) {
+                // Treat as success — teacher IS present, just already logged
                 setView('already_marked');
-                toast('Already marked for today!', { icon: '📋' });
+                toast('Already marked for this lecture! ✅', { icon: '📋' });
+                onSuccess?.();          // ← updates parent so button goes away
                 fetchStatus();
+                setTimeout(onClose, 2200);
             } else if (msg.includes('not registered') || msg.includes('Face not registered') || msg.includes('invalid or corrupted')) {
                 setStatusData(prev => prev ? { ...prev, faceRegistered: false } : prev);
                 setCapturedImage(null);
@@ -279,10 +292,18 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
             }
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'An error occurred';
-            setCapturedImage(null);
-            resetVoice();
-            setView('voice_face');
-            toast.error(msg || 'Verification failed. Try again.');
+            if (msg.includes('already marked')) {
+                setView('already_marked');
+                toast('Already marked for this lecture! ✅', { icon: '📋' });
+                onSuccess?.();
+                fetchStatus();
+                setTimeout(onClose, 2200);
+            } else {
+                setCapturedImage(null);
+                resetVoice();
+                setView('voice_face');
+                toast.error(msg || 'Verification failed. Try again.');
+            }
         }
     };
 
@@ -325,9 +346,6 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
 
     if (!isOpen) return null;
 
-    /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
-    /*  Sub-views                                                 */
-    /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
     /* Shared webcam view */
     const WebcamView = ({ onSubmit, submitLabel, submitColor = 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20' }: {
@@ -483,7 +501,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                                 <div className="w-16 h-16 rounded-full border-4 border-indigo-500/20 border-t-indigo-500 animate-spin" />
                                                 <Fingerprint className="absolute inset-0 m-auto w-7 h-7 text-indigo-400" />
                                             </div>
-                                            <p className="text-white/40 text-sm font-medium">Checking biometric statusâ€¦</p>
+                                            <p className="text-white/40 text-sm font-medium">Checking biometric status</p>
                                         </motion.div>
                                     )}
 
@@ -745,7 +763,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                                 <ShieldCheck className="absolute inset-0 m-auto w-10 h-10 text-indigo-400" />
                                             </div>
                                             <div className="text-center space-y-2">
-                                                <p className="font-black text-white/80 text-lg">Verifying Biometricsâ€¦</p>
+                                                <p className="font-black text-white/80 text-lg">Verifying Biometrics</p>
                                                 <p className="text-xs text-white/30">Please wait while we authenticate you</p>
                                             </div>
                                             <div className="flex gap-1.5">

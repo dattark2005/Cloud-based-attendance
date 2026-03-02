@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Section = require('../models/Section');
 const { uploadToCloudinary } = require('../config/cloudinary');
 const { verifyFace, identifyMultipleFaces } = require('../utils/apiClient');
+const { broadcastToSection } = require('../utils/socket');
 const { ATTENDANCE_STATUS, LECTURE_STATUS, REQUEST_STATUS, CLOUDINARY_FOLDERS, DEFAULTS } = require('../config/constants');
 
 /**
@@ -576,6 +577,8 @@ const updateStudentAttendance = async (req, res, next) => {
 
     if (status === 'ABSENT') {
        await AttendanceRecord.findOneAndDelete({ lectureId, studentId });
+       // Real-time: notify all clients in this section
+       broadcastToSection(lecture.sectionId.toString(), 'attendance:updated', { lectureId, studentId, status: 'ABSENT' });
        return res.json({ success: true, message: 'Student marked absent' });
     } else {
        let record = await AttendanceRecord.findOne({ lectureId, studentId });
@@ -592,6 +595,8 @@ const updateStudentAttendance = async (req, res, next) => {
              verificationMethod: 'MANUAL'
           });
        }
+       // Real-time: notify all clients in this section
+       broadcastToSection(lecture.sectionId.toString(), 'attendance:updated', { lectureId, studentId, status });
        return res.json({ success: true, message: `Student marked ${status}` });
     }
   } catch (error) {

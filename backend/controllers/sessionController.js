@@ -98,6 +98,14 @@ const endSession = async (req, res, next) => {
 const getActiveSessions = async (req, res, next) => {
     try {
         const userId = req.user._id;
+
+        // Auto-complete any globally expired lectures
+        const now = new Date();
+        await Lecture.updateMany(
+            { status: { $in: [LECTURE_STATUS.SCHEDULED, LECTURE_STATUS.ONGOING] }, scheduledEnd: { $lt: now } },
+            { $set: { status: LECTURE_STATUS.COMPLETED, actualEnd: now } }
+        );
+
         let query = { status: LECTURE_STATUS.ONGOING };
 
         if (req.user.role === 'STUDENT') {

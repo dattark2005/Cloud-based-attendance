@@ -127,15 +127,15 @@ export default function ClassroomCard({ section, role, isOngoing, onRefresh }: C
               disabled={sessionLoading}
               onClick={handleSessionAction}
               className={`w-full py-3 rounded-2xl border flex items-center justify-center space-x-2 transition-all text-[10px] font-black uppercase tracking-widest ${isOngoing
-                  ? 'bg-red-500/10 border-red-500/20 text-red-400 hover:bg-red-500/20'
-                  : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20'
+                ? 'bg-red-500/10 border-red-500/20 text-red-400 hover:bg-red-500/20'
+                : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20'
                 }`}
             >
               {sessionLoading ? (
                 <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
               ) : (
                 <>
-                  <span>{isOngoing ? 'End Live Session' : 'Start Live Session'}</span>
+                  <span>{isOngoing ? 'End Live Session' : 'Start Instant Session'}</span>
                   {!isOngoing && <Plus className="w-4 h-4" />}
                 </>
               )}
@@ -156,8 +156,8 @@ export default function ClassroomCard({ section, role, isOngoing, onRefresh }: C
               onClick={(e) => { e.stopPropagation(); if (isOngoing) router.push(`/student/session/active?sectionId=${section._id}`); }}
               disabled={!isOngoing}
               className={`w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center justify-center space-x-2 transition-all ${isOngoing
-                  ? 'bg-emerald-500 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-500/20'
-                  : 'bg-white/5 text-white/40 border border-white/5 cursor-not-allowed'
+                ? 'bg-emerald-500 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-500/20'
+                : 'bg-white/5 text-white/40 border border-white/5 cursor-not-allowed'
                 }`}
             >
               <span>{isOngoing ? 'Enter Live Session' : 'No Active Session'}</span>

@@ -7,6 +7,7 @@ import {
     Clock, Calendar, BookOpen, BadgeCheck, AlertCircle,
     ChevronRight, Shield, Edit3, Users, Loader2,
     UserCheck, UserX, ShieldCheck, RefreshCw, ScanLine,
+    LogIn, LogOut, Timer, ChevronDown,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -14,6 +15,7 @@ import { toast } from 'react-hot-toast';
 import DashboardLayout from '@/components/DashboardLayout';
 import { fetchWithAuth } from '@/lib/api';
 import TeacherAttendanceModal from '@/components/modals/TeacherAttendanceModal';
+import { socketService } from '@/lib/socket';
 
 function formatDateTime(dateStr: string) {
     const d = new Date(dateStr);
@@ -74,6 +76,17 @@ export default function LectureDetailPage({
     const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
     const [updatingId, setUpdatingId] = useState<string | null>(null);
 
+    // ── Door / In-Out Timeline ──
+    interface DoorEvent { type: 'ENTRY' | 'EXIT'; timestamp: string; }
+    interface StudentTimeline {
+        student: { _id: string; fullName: string; prn?: string; email?: string };
+        events: DoorEvent[];
+        totalMinutes: number;
+    }
+    const [doorLog, setDoorLog] = useState<StudentTimeline[]>([]);
+    const [doorLoading, setDoorLoading] = useState(false);
+    const [expandedStudents, setExpandedStudents] = useState<Set<string>>(new Set());
+
     /* ─── Load data ─── */
     const loadLectureData = useCallback(async () => {
         try {
@@ -92,6 +105,15 @@ export default function LectureDetailPage({
         }
     }, [lectureId]);
 
+    const loadDoorLog = useCallback(async () => {
+        setDoorLoading(true);
+        try {
+            const res = await fetchWithAuth(`/door/lecture/${lectureId}`);
+            if (res.success) setDoorLog(res.data.students || []);
+        } catch { /* non-critical */ }
+        finally { setDoorLoading(false); }
+    }, [lectureId]);
+
     const checkTeacherAttendance = useCallback(async () => {
         try {
             const res = await fetchWithAuth(`/teacher-attendance/status?lectureId=${lectureId}`);
@@ -105,9 +127,44 @@ export default function LectureDetailPage({
 
     useEffect(() => {
         loadLectureData();
+        loadDoorLog();
         checkTeacherAttendance();
-        return () => stopCamera();
-    }, [loadLectureData, checkTeacherAttendance]);
+
+        // ── Socket: join section room + listen for real-time door events ──
+        const socket = socketService.connect();
+        socket.emit('join_section', sectionId);
+
+        const handleDoorEvent = (payload: any) => {
+            if (payload.lectureId?.toString() !== lectureId) return;
+            // Append the new event to the correct student's timeline live
+            setDoorLog(prev => {
+                const existing = prev.find(s => s.student._id.toString() === payload.studentId.toString());
+                const newEvent: DoorEvent = { type: payload.type, timestamp: payload.timestamp };
+                if (existing) {
+                    return prev.map(s =>
+                        s.student._id.toString() === payload.studentId.toString()
+                            ? { ...s, events: [...s.events, newEvent] }
+                            : s
+                    );
+                } else {
+                    return [...prev, {
+                        student: { _id: payload.studentId, fullName: payload.studentName, prn: payload.studentPrn },
+                        events: [newEvent],
+                        totalMinutes: 0,
+                    }];
+                }
+            });
+            // Show a toast
+            const icon = payload.type === 'ENTRY' ? '🟢' : '🔴';
+            toast(`${icon} ${payload.studentName} ${payload.type === 'ENTRY' ? 'entered' : 'left'} the room`, { duration: 3000 });
+        };
+
+        socket.on('door:event', handleDoorEvent);
+        return () => {
+            socket.off('door:event', handleDoorEvent);
+            stopCamera();
+        };
+    }, [loadLectureData, loadDoorLog, checkTeacherAttendance, lectureId, sectionId]);
 
     // Safety net: if AnimatePresence delays the video mount slightly beyond the callback ref,
     // retry attaching the stream every 50ms until the element appears.
@@ -245,7 +302,10 @@ export default function LectureDetailPage({
 
     const start = lecture?.scheduledStart ? formatDateTime(lecture.scheduledStart) : null;
     const end = lecture?.scheduledEnd ? formatDateTime(lecture.scheduledEnd) : null;
-    const isActive = lecture?.status === 'ONGOING' || lecture?.status === 'SCHEDULED';
+    const isActive = lecture?.status === 'ONGOING';
+    const isScheduled = lecture?.status === 'SCHEDULED';
+    const isPast = lecture?.status === 'COMPLETED';
+    const canTakePhoto = isActive || isScheduled;
 
     return (
         <DashboardLayout>
@@ -269,13 +329,17 @@ export default function LectureDetailPage({
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         <div className="flex items-start gap-4">
                             <div className="w-14 h-14 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-                                <BookOpen className="w-7 h-7 text-primary" />
+                                <Calendar className="w-7 h-7 text-primary" />
                             </div>
                             <div>
-                                <h1 className="text-2xl font-black tracking-tight text-gradient">
-                                    {lecture?.topic}
+                                <h1 className="text-2xl font-black tracking-tight">
+                                    {start ? start.date : 'Lecture'}
                                 </h1>
                                 <p className="text-white/40 text-sm mt-1">
+                                    {start?.time}{end ? ` – ${end.time}` : ''}
+                                    {lecture?.roomNumber ? ` · Room ${lecture.roomNumber}` : ''}
+                                </p>
+                                <p className="text-white/30 text-xs mt-0.5">
                                     {section?.courseId?.courseName} · {section?.sectionName}
                                 </p>
                             </div>
@@ -286,20 +350,11 @@ export default function LectureDetailPage({
                     </div>
 
                     <div className="flex flex-wrap gap-4 pt-2">
-                        {start && (
-                            <>
-                                <div className="flex items-center gap-2 text-sm text-white/40">
-                                    <Calendar className="w-4 h-4" />
-                                    <span>{start.date}</span>
-                                </div>
-                                <div className="flex items-center gap-2 text-sm text-white/40">
-                                    <Clock className="w-4 h-4" />
-                                    <span>{start.time} – {end?.time}</span>
-                                </div>
-                            </>
-                        )}
-                        {lecture?.sectionId?.roomNumber && (
-                            <div className="text-sm text-white/40">📍 {lecture.sectionId.roomNumber}</div>
+                        {lecture?.roomNumber && (
+                            <div className="flex items-center gap-2 text-sm text-white/40">
+                                <span>📍</span>
+                                <span>Room {lecture.roomNumber}</span>
+                            </div>
                         )}
                     </div>
 
@@ -336,57 +391,59 @@ export default function LectureDetailPage({
                     )}
                 </motion.div>
 
-                {/* ── Teacher's Own Attendance ── */}
-                <motion.div
-                    initial={{ opacity: 0, y: 16 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.1 }}
-                    className="glass-card p-6 rounded-[28px] border-white/8 flex items-center justify-between gap-4"
-                >
-                    <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 rounded-2xl bg-indigo-500/15 border border-indigo-500/25 flex items-center justify-center">
-                            <ShieldCheck className="w-6 h-6 text-indigo-400" />
+                {/* ── Teacher's Own Attendance (only for active/scheduled, NOT past lectures) ── */}
+                {!isPast && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 16 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.1 }}
+                        className="glass-card p-6 rounded-[28px] border-white/8 flex items-center justify-between gap-4"
+                    >
+                        <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-2xl bg-indigo-500/15 border border-indigo-500/25 flex items-center justify-center">
+                                <ShieldCheck className="w-6 h-6 text-indigo-400" />
+                            </div>
+                            <div>
+                                <p className="font-bold text-sm">Your Attendance</p>
+                                <p className="text-xs text-white/40">
+                                    {teacherMarked === null
+                                        ? 'Checking...'
+                                        : teacherMarked
+                                            ? `Marked present at ${teacherMarkedAt ? new Date(teacherMarkedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : ''}`
+                                            : 'Not yet marked for today'}
+                                </p>
+                            </div>
                         </div>
-                        <div>
-                            <p className="font-bold text-sm">Your Attendance</p>
-                            <p className="text-xs text-white/40">
-                                {teacherMarked === null
-                                    ? 'Checking...'
-                                    : teacherMarked
-                                        ? `Marked present at ${teacherMarkedAt ? new Date(teacherMarkedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : ''}`
-                                        : 'Not yet marked for today'}
-                            </p>
-                        </div>
-                    </div>
-                    <AnimatePresence mode="wait">
-                        {teacherMarked === true ? (
-                            <motion.div
-                                key="marked"
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                className="flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/15 border border-emerald-500/30"
-                            >
-                                <BadgeCheck className="w-4 h-4 text-emerald-400" />
-                                <span className="text-xs font-bold text-emerald-300">Present</span>
-                            </motion.div>
-                        ) : (
-                            <motion.button
-                                key="mark-btn"
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                onClick={() => setIsAttendanceModalOpen(true)}
-                                className="flex items-center gap-2 px-4 py-2 rounded-full bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/15 transition-all"
-                            >
-                                <AlertCircle className="w-4 h-4 text-amber-400" />
-                                <span className="text-xs font-bold text-amber-300">Mark Now</span>
-                                <ChevronRight className="w-3.5 h-3.5 text-amber-400" />
-                            </motion.button>
-                        )}
-                    </AnimatePresence>
-                </motion.div>
+                        <AnimatePresence mode="wait">
+                            {teacherMarked === true ? (
+                                <motion.div
+                                    key="marked"
+                                    initial={{ opacity: 0, scale: 0.9 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    className="flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/15 border border-emerald-500/30"
+                                >
+                                    <BadgeCheck className="w-4 h-4 text-emerald-400" />
+                                    <span className="text-xs font-bold text-emerald-300">Present</span>
+                                </motion.div>
+                            ) : (
+                                <motion.button
+                                    key="mark-btn"
+                                    initial={{ opacity: 0, scale: 0.9 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    onClick={() => setIsAttendanceModalOpen(true)}
+                                    className="flex items-center gap-2 px-4 py-2 rounded-full bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/15 transition-all"
+                                >
+                                    <AlertCircle className="w-4 h-4 text-amber-400" />
+                                    <span className="text-xs font-bold text-amber-300">Mark Now</span>
+                                    <ChevronRight className="w-3.5 h-3.5 text-amber-400" />
+                                </motion.button>
+                            )}
+                        </AnimatePresence>
+                    </motion.div>
+                )}
 
-                {/* ── Classroom Photo Attendance ── */}
-                {isActive && (
+                {/* ── Classroom Photo Attendance (only for active/scheduled) ── */}
+                {canTakePhoto && (
                     <motion.div
                         initial={{ opacity: 0, y: 16 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -568,12 +625,19 @@ export default function LectureDetailPage({
                 >
                     <div className="flex items-center justify-between">
                         <h2 className="text-xl font-black tracking-tight">Student Attendance</h2>
-                        <button
-                            onClick={loadLectureData}
-                            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-white/60 hover:text-white transition-all"
-                        >
-                            <RefreshCw className="w-3.5 h-3.5" /> Refresh
-                        </button>
+                        <div className="flex items-center gap-2">
+                            {isPast && (
+                                <span className="text-[10px] font-black text-amber-400 bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 rounded-full uppercase tracking-widest">
+                                    ✏️ Past Lecture — Edit Manually
+                                </span>
+                            )}
+                            <button
+                                onClick={loadLectureData}
+                                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-white/60 hover:text-white transition-all"
+                            >
+                                <RefreshCw className="w-3.5 h-3.5" /> Refresh
+                            </button>
+                        </div>
                     </div>
 
                     {allStudents.length === 0 ? (
@@ -623,19 +687,17 @@ export default function LectureDetailPage({
                                                         <span className="text-[10px] font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-full uppercase tracking-widest">
                                                             Present
                                                         </span>
-                                                        {isActive && (
-                                                            <button
-                                                                onClick={() => updateAttendance(student._id, 'ABSENT')}
-                                                                disabled={updatingId === student._id}
-                                                                className="p-2 rounded-xl bg-red-500/5 hover:bg-red-500/15 border border-red-500/10 hover:border-red-500/30 transition-all disabled:opacity-40"
-                                                                title="Mark Absent"
-                                                            >
-                                                                {updatingId === student._id
-                                                                    ? <Loader2 className="w-3.5 h-3.5 text-red-400 animate-spin" />
-                                                                    : <XCircle className="w-3.5 h-3.5 text-red-400/60 hover:text-red-400 transition-colors" />
-                                                                }
-                                                            </button>
-                                                        )}
+                                                        <button
+                                                            onClick={() => updateAttendance(student._id, 'ABSENT')}
+                                                            disabled={updatingId === student._id}
+                                                            className="p-2 rounded-xl bg-red-500/5 hover:bg-red-500/15 border border-red-500/10 hover:border-red-500/30 transition-all disabled:opacity-40"
+                                                            title="Mark Absent"
+                                                        >
+                                                            {updatingId === student._id
+                                                                ? <Loader2 className="w-3.5 h-3.5 text-red-400 animate-spin" />
+                                                                : <XCircle className="w-3.5 h-3.5 text-red-400/60 hover:text-red-400 transition-colors" />
+                                                            }
+                                                        </button>
                                                     </div>
                                                 </motion.div>
                                             );
@@ -658,14 +720,14 @@ export default function LectureDetailPage({
                                                 initial={{ opacity: 0, x: -12 }}
                                                 animate={{ opacity: 1, x: 0 }}
                                                 transition={{ delay: i * 0.04 }}
-                                                className="glass-card p-4 rounded-[20px] border-red-500/5 flex items-center justify-between gap-4 opacity-70 hover:opacity-90 transition-all"
+                                                className="glass-card p-4 rounded-[20px] border-red-500/5 flex items-center justify-between gap-4 transition-all"
                                             >
                                                 <div className="flex items-center gap-3">
                                                     <div className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-sm font-black text-white/40 shrink-0">
                                                         {student.fullName?.charAt(0).toUpperCase()}
                                                     </div>
                                                     <div className="min-w-0">
-                                                        <p className="text-sm font-bold truncate text-white/70">{student.fullName}</p>
+                                                        <p className="text-sm font-bold truncate">{student.fullName}</p>
                                                         <p className="text-[11px] text-white/30 truncate">{student.prn || student.email}</p>
                                                     </div>
                                                 </div>
@@ -673,25 +735,165 @@ export default function LectureDetailPage({
                                                     <span className="text-[10px] font-black text-red-400/70 bg-red-500/5 border border-red-500/15 px-3 py-1.5 rounded-full uppercase tracking-widest">
                                                         Absent
                                                     </span>
-                                                    {isActive && (
-                                                        <button
-                                                            onClick={() => updateAttendance(student._id, 'PRESENT')}
-                                                            disabled={updatingId === student._id}
-                                                            className="p-2 rounded-xl bg-emerald-500/5 hover:bg-emerald-500/15 border border-emerald-500/10 hover:border-emerald-500/30 transition-all disabled:opacity-40"
-                                                            title="Mark Present"
-                                                        >
-                                                            {updatingId === student._id
-                                                                ? <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
-                                                                : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400/60 hover:text-emerald-400 transition-colors" />
-                                                            }
-                                                        </button>
-                                                    )}
+                                                    <button
+                                                        onClick={() => updateAttendance(student._id, 'PRESENT')}
+                                                        disabled={updatingId === student._id}
+                                                        className="p-2 rounded-xl bg-emerald-500/5 hover:bg-emerald-500/15 border border-emerald-500/10 hover:border-emerald-500/30 transition-all disabled:opacity-40"
+                                                        title="Mark Present"
+                                                    >
+                                                        {updatingId === student._id
+                                                            ? <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
+                                                            : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400/60 hover:text-emerald-400 transition-colors" />
+                                                        }
+                                                    </button>
                                                 </div>
                                             </motion.div>
                                         ))}
                                     </div>
                                 </div>
                             )}
+                        </div>
+                    )}
+                </motion.div>
+
+                {/* ══════════ DOOR / IN-OUT TIMELINE ══════════ */}
+                <motion.div
+                    initial={{ opacity: 0, y: 16 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.3 }}
+                    className="glass-card p-6 rounded-[32px] border-white/8 space-y-5"
+                >
+                    {/* Header */}
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-2xl bg-violet-500/15 border border-violet-500/25 flex items-center justify-center">
+                                <Timer className="w-5 h-5 text-violet-400" />
+                            </div>
+                            <div>
+                                <h2 className="text-lg font-black tracking-tight">In-Out Timeline</h2>
+                                <p className="text-[11px] text-white/30">Live door camera tracking · updates instantly</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {/* Live dot */}
+                            <span className="flex items-center gap-1.5 text-[10px] font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-full uppercase tracking-widest">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                Live
+                            </span>
+                            <button
+                                onClick={loadDoorLog}
+                                className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/8 transition-all"
+                                title="Refresh"
+                            >
+                                <RefreshCw className="w-3.5 h-3.5 text-white/40" />
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Content */}
+                    {doorLoading ? (
+                        <div className="space-y-2">
+                            {[1, 2, 3].map(i => <div key={i} className="h-14 bg-white/5 animate-pulse rounded-2xl" />)}
+                        </div>
+                    ) : doorLog.length === 0 ? (
+                        <div className="text-center py-10 space-y-2">
+                            <div className="w-12 h-12 bg-white/5 rounded-full flex items-center justify-center mx-auto">
+                                <Timer className="w-5 h-5 text-white/15" />
+                            </div>
+                            <p className="text-white/25 text-sm">No door events yet.</p>
+                            <p className="text-white/15 text-[11px]">Start <code className="bg-white/5 px-1 rounded">camera_monitor.py --room {lecture?.roomNumber || '???'}</code> to begin tracking.</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-2">
+                            {/* Summary bar */}
+                            <div className="flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-white/4 border border-white/6 mb-4">
+                                <Users className="w-4 h-4 text-white/30" />
+                                <span className="text-sm text-white/50">
+                                    <span className="font-black text-white">{doorLog.length}</span> students tracked this session
+                                </span>
+                            </div>
+
+                            {doorLog.map((entry, i) => {
+                                const sid = entry.student._id.toString();
+                                const isExpanded = expandedStudents.has(sid);
+                                const toggle = () => setExpandedStudents(prev => {
+                                    const next = new Set(prev);
+                                    isExpanded ? next.delete(sid) : next.add(sid);
+                                    return next;
+                                });
+                                // Recompute totalMinutes live (backend may not have re-calculated)
+                                let liveMs = 0, lastEntry: Date | null = null;
+                                for (const ev of entry.events) {
+                                    if (ev.type === 'ENTRY') lastEntry = new Date(ev.timestamp);
+                                    else if (ev.type === 'EXIT' && lastEntry) { liveMs += new Date(ev.timestamp).getTime() - lastEntry.getTime(); lastEntry = null; }
+                                }
+                                if (lastEntry) liveMs += Date.now() - lastEntry.getTime();
+                                const mins = Math.round(liveMs / 60000);
+                                const isInside = entry.events.length > 0 && entry.events[entry.events.length - 1].type === 'ENTRY';
+
+                                return (
+                                    <motion.div
+                                        key={sid}
+                                        initial={{ opacity: 0, y: 8 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        transition={{ delay: i * 0.04 }}
+                                        className="rounded-2xl border border-white/6 overflow-hidden"
+                                    >
+                                        {/* Student row — click to expand */}
+                                        <button
+                                            onClick={toggle}
+                                            className="w-full flex items-center justify-between gap-4 px-4 py-3 bg-white/4 hover:bg-white/6 transition-all text-left"
+                                        >
+                                            <div className="flex items-center gap-3 min-w-0">
+                                                <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${isInside ? 'bg-emerald-400 animate-pulse' : 'bg-white/20'}`} />
+                                                <div className="min-w-0">
+                                                    <p className="text-sm font-bold truncate">{entry.student.fullName}</p>
+                                                    <p className="text-[11px] text-white/30 truncate">{entry.student.prn || entry.student.email}</p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2 shrink-0">
+                                                {isInside && (
+                                                    <span className="text-[9px] font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 rounded-full uppercase tracking-widest">Inside</span>
+                                                )}
+                                                <span className={`text-[10px] font-black px-3 py-1.5 rounded-full border ${mins > 0 ? 'text-violet-400 bg-violet-500/10 border-violet-500/20' : 'text-white/30 bg-white/5 border-white/8'}`}>
+                                                    {mins}m in class
+                                                </span>
+                                                <ChevronDown className={`w-4 h-4 text-white/30 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                                            </div>
+                                        </button>
+
+                                        {/* Expanded event list */}
+                                        <AnimatePresence>
+                                            {isExpanded && (
+                                                <motion.div
+                                                    initial={{ height: 0, opacity: 0 }}
+                                                    animate={{ height: 'auto', opacity: 1 }}
+                                                    exit={{ height: 0, opacity: 0 }}
+                                                    transition={{ duration: 0.2 }}
+                                                    className="px-4 pb-3 space-y-1.5 bg-white/2"
+                                                >
+                                                    <div className="pt-3 space-y-1.5">
+                                                        {entry.events.map((ev, j) => (
+                                                            <div key={j} className={`flex items-center gap-3 text-[12px] py-1.5 px-3 rounded-xl ${ev.type === 'ENTRY' ? 'bg-emerald-500/8 border border-emerald-500/10' : 'bg-red-500/5 border border-red-500/8'}`}>
+                                                                {ev.type === 'ENTRY'
+                                                                    ? <LogIn className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                                                    : <LogOut className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                                                                }
+                                                                <span className={`font-bold ${ev.type === 'ENTRY' ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                                    {ev.type === 'ENTRY' ? 'Entered' : 'Left'}
+                                                                </span>
+                                                                <span className="text-white/40 ml-auto">
+                                                                    {new Date(ev.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                                                                </span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </motion.div>
+                                            )}
+                                        </AnimatePresence>
+                                    </motion.div>
+                                );
+                            })}
                         </div>
                     )}
                 </motion.div>
