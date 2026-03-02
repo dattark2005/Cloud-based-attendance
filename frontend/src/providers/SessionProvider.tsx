@@ -42,7 +42,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const socket = socketService.connect();
 
     socket.on('session:started', (data) => {
-      toast.success(`Session started: ${data.courseName}`, {
+      const msg = data?.courseName ? `Session started: ${data.courseName}` : 'Session started!';
+      toast.success(msg, {
         icon: '🚀',
         duration: 5000
       });

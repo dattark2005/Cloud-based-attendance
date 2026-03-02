@@ -17,6 +17,7 @@ const biometricRoutes = require('./routes/biometric');
 const sectionRoutes = require('./routes/section');
 const teacherAttendanceRoutes = require('./routes/teacherAttendance');
 const gpsAttendanceRoutes = require('./routes/gpsAttendance');
+const doorRoutes = require('./routes/door');
 const { initSocket } = require('./utils/socket');
 
 // Initialize express app
@@ -78,6 +79,7 @@ app.use('/api/biometric', biometricRoutes);
 app.use('/api/sections', sectionRoutes);
 app.use('/api/teacher-attendance', teacherAttendanceRoutes);
 app.use('/api/gps-attendance', gpsAttendanceRoutes);
+app.use('/api/door', doorRoutes);
 
 // Root route
 app.get('/', (req, res) => {

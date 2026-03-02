@@ -135,6 +135,13 @@ const getSectionLectures = async (req, res, next) => {
         const section = await Section.findById(sectionId);
         if (!section) return res.status(404).json({ success: false, message: 'Section not found' });
 
+        // Auto-complete lectures whose scheduled end time has passed
+        const now = new Date();
+        await Lecture.updateMany(
+            { sectionId, status: { $in: [LECTURE_STATUS.SCHEDULED, LECTURE_STATUS.ONGOING] }, scheduledEnd: { $lt: now } },
+            { $set: { status: LECTURE_STATUS.COMPLETED, actualEnd: now } }
+        );
+
         const lectures = await Lecture.find({ sectionId }).sort({ scheduledStart: -1 }).lean();
 
         const lecturesWithStats = await Promise.all(
@@ -167,8 +174,8 @@ const scheduleLecture = async (req, res, next) => {
         if (section.teacherId.toString() !== req.user._id.toString()) {
             return res.status(403).json({ success: false, message: 'Only the classroom teacher can schedule lectures' });
         }
-        if (!scheduledStart || !scheduledEnd) {
-            return res.status(400).json({ success: false, message: 'Start and end time are required' });
+        if (!scheduledStart || !scheduledEnd || !roomNumber) {
+            return res.status(400).json({ success: false, message: 'Date, time and room number are required' });
         }
         if (new Date(scheduledStart) >= new Date(scheduledEnd)) {
             return res.status(400).json({ success: false, message: 'End time must be after start time' });
@@ -178,9 +185,7 @@ const scheduleLecture = async (req, res, next) => {
             sectionId, teacherId: req.user._id,
             scheduledStart: new Date(scheduledStart),
             scheduledEnd: new Date(scheduledEnd),
-            roomNumber: roomNumber || section.roomNumber,
-            topic: topic || 'General Lecture',
-            notes,
+            roomNumber,
             status: LECTURE_STATUS.SCHEDULED,
         });
 
@@ -202,9 +207,12 @@ const cancelLecture = async (req, res, next) => {
         if (lecture.teacherId.toString() !== req.user._id.toString()) {
             return res.status(403).json({ success: false, message: 'Only the teacher can cancel this lecture' });
         }
-        lecture.status = LECTURE_STATUS.CANCELLED;
-        await lecture.save();
-        res.json({ success: true, message: 'Lecture cancelled successfully' });
+        
+        // Permanently delete the lecture
+        await Lecture.findByIdAndDelete(lectureId);
+        
+        // Optionally pass a background socket event here if we choose to
+        res.json({ success: true, message: 'Lecture deleted successfully' });
     } catch (error) {
         next(error);
     }

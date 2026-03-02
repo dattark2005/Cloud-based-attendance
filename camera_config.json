@@ -1,0 +1,12 @@
+{
+    "rooms": {
+        "4006": "http://10.187.79.49:8080/video",
+        "4007": "http://192.168.1.8:8080/video",
+        "301": "http://192.168.1.12:8080/video"
+    },
+    "_instructions": {
+        "android": "Install 'IP Webcam' app → Start Server → use the shown URL",
+        "ios": "Install 'Camo' or 'EpocCam' app → start → use RTSP URL shown",
+        "usage": "Run: python camera_monitor.py --room 4006"
+    }
+}

@@ -12,6 +12,7 @@ import { toast } from 'react-hot-toast';
 import DashboardLayout from '@/components/DashboardLayout';
 import { fetchWithAuth } from '@/lib/api';
 import ScheduleLectureModal from '@/components/modals/ScheduleLectureModal';
+import { socketService } from '@/lib/socket';
 
 function formatDateTime(dateStr: string) {
     const d = new Date(dateStr);
@@ -68,7 +69,18 @@ export default function ClassroomDetailPage({ params }: { params: Promise<{ sect
     useEffect(() => {
         loadSection();
         loadLectures();
-    }, [loadSection, loadLectures]);
+
+        // Real-time: refresh lecture list when a session starts/ends
+        const socket = socketService.connect();
+        socket.emit('join_section', sectionId);
+        const handleSessionChange = () => loadLectures();
+        socket.on('session:started', handleSessionChange);
+        socket.on('session:ended', handleSessionChange);
+        return () => {
+            socket.off('session:started', handleSessionChange);
+            socket.off('session:ended', handleSessionChange);
+        };
+    }, [loadSection, loadLectures, sectionId]);
 
     const handleCancelLecture = async (e: React.MouseEvent, lectureId: string) => {
         e.stopPropagation();
@@ -197,11 +209,10 @@ export default function ClassroomDetailPage({ params }: { params: Promise<{ sect
                                                 <BookOpen className="w-5 h-5 text-primary" />
                                             </div>
                                             <div>
-                                                <p className="font-black text-sm">{lecture.topic}</p>
+                                                <p className="font-black text-sm">
+                                                    {start.date}
+                                                </p>
                                                 <div className="flex items-center gap-3 mt-1 flex-wrap">
-                                                    <span className="flex items-center gap-1 text-[11px] text-white/40">
-                                                        <Calendar className="w-3 h-3" /> {start.date}
-                                                    </span>
                                                     <span className="flex items-center gap-1 text-[11px] text-white/40">
                                                         <Clock className="w-3 h-3" /> {start.time} – {end.time}
                                                     </span>
@@ -256,21 +267,22 @@ export default function ClassroomDetailPage({ params }: { params: Promise<{ sect
                     {pastLectures.length > 0 && (
                         <div className="space-y-3 pt-4">
                             <h4 className="text-sm font-bold text-white/30 uppercase tracking-widest">Past Lectures</h4>
-                            {pastLectures.slice(0, 5).map((lecture) => {
+                            {pastLectures.slice(0, 8).map((lecture) => {
                                 const start = formatDateTime(lecture.scheduledStart);
+                                const end = formatDateTime(lecture.scheduledEnd);
                                 return (
                                     <div
                                         key={lecture._id}
                                         onClick={() => router.push(`/teacher/classroom/${sectionId}/lecture/${lecture._id}`)}
-                                        className="glass-card p-4 rounded-[20px] border-white/3 flex items-center justify-between gap-4 opacity-50 hover:opacity-75 cursor-pointer transition-all"
+                                        className="glass-card p-4 rounded-[20px] border-white/5 flex items-center justify-between gap-4 cursor-pointer hover:border-primary/20 hover:bg-white/4 transition-all"
                                     >
                                         <div className="flex items-center gap-3">
                                             <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center shrink-0">
                                                 <BookOpen className="w-4 h-4 text-white/30" />
                                             </div>
                                             <div>
-                                                <p className="text-sm font-bold text-white/60">{lecture.topic}</p>
-                                                <p className="text-[11px] text-white/30">{start.date}</p>
+                                                <p className="text-sm font-bold">{start.date}</p>
+                                                <p className="text-[11px] text-white/30">{start.time} – {end.time}{lecture.roomNumber ? ` · ${lecture.roomNumber}` : ''}</p>
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-3">

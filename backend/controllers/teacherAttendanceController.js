@@ -130,6 +130,32 @@ const markAttendance = async (req, res, next) => {
             confidenceScore,
         });
 
+        // Auto-start the lecture (change from SCHEDULED to ONGOING)
+        if (lectureId) {
+            const Lecture = require('../models/Lecture');
+            // Populate sectionId to get courseName for the socket broadcast
+            const lecture = await Lecture.findById(lectureId).populate({
+                path: 'sectionId',
+                populate: { path: 'courseId', select: 'courseName' }
+            });
+            
+            if (lecture && lecture.status === 'SCHEDULED') {
+                lecture.status = 'ONGOING';
+                lecture.actualStart = new Date();
+                await lecture.save();
+                
+                const courseName = lecture.sectionId?.courseId?.courseName || 'Classroom';
+
+                // Notify clients to refresh
+                const { broadcastToSection } = require('../utils/socket');
+                broadcastToSection(lecture.sectionId._id.toString(), 'session:started', {
+                    lectureId: lecture._id,
+                    startedAt: lecture.actualStart,
+                    courseName
+                });
+            }
+        }
+
         res.json({
             success: true,
             message: '✅ Attendance marked successfully!',
