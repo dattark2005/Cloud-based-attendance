@@ -7,7 +7,7 @@ import {
     Clock, Calendar, BookOpen, BadgeCheck, AlertCircle,
     ChevronRight, Shield, Edit3, Users, Loader2,
     UserCheck, UserX, ShieldCheck, RefreshCw, ScanLine,
-    LogIn, LogOut, Timer, ChevronDown,
+    LogIn, LogOut, Timer, ChevronDown, Video
 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -16,6 +16,7 @@ import DashboardLayout from '@/components/DashboardLayout';
 import { fetchWithAuth } from '@/lib/api';
 import TeacherAttendanceModal from '@/components/modals/TeacherAttendanceModal';
 import { socketService } from '@/lib/socket';
+import DualCameraUploadModal from '@/components/modals/DualCameraUploadModal';
 
 function formatDateTime(dateStr: string) {
     const d = new Date(dateStr);
@@ -65,12 +66,14 @@ export default function LectureDetailPage({
     const [teacherMarkedAt, setTeacherMarkedAt] = useState<string | null>(null);
     const [isAttendanceModalOpen, setIsAttendanceModalOpen] = useState(false);
 
-    // Photo / Camera
     const [photoMode, setPhotoMode] = useState<'idle' | 'camera' | 'preview'>('idle');
     const [capturedImage, setCapturedImage] = useState<string | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
     const [processingResult, setProcessingResult] = useState<{ detected: number; marked: number } | null>(null);
     const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+
+    // 2-Camera testing flow
+    const [isDualCameraModalOpen, setIsDualCameraModalOpen] = useState(false);
 
     // Manual edit
     const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
@@ -450,14 +453,22 @@ export default function LectureDetailPage({
                         transition={{ delay: 0.15 }}
                         className="glass-card p-8 rounded-[32px] border-white/8 space-y-6"
                     >
-                        <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-2xl bg-violet-500/15 border border-violet-500/25 flex items-center justify-center">
-                                <ScanLine className="w-6 h-6 text-violet-400" />
+                        <div className="flex items-center justify-between gap-4">
+                            <div className="flex items-center gap-4">
+                                <div className="w-12 h-12 rounded-2xl bg-violet-500/15 border border-violet-500/25 flex items-center justify-center">
+                                    <ScanLine className="w-6 h-6 text-violet-400" />
+                                </div>
+                                <div>
+                                    <h2 className="text-lg font-black">AI Attendance Verification</h2>
+                                    <p className="text-xs text-white/40 mt-0.5">Use Photo Analysis or Dual-Camera monitoring.</p>
+                                </div>
                             </div>
-                            <div>
-                                <h2 className="text-lg font-black">Mark Attendance via Photo</h2>
-                                <p className="text-xs text-white/40 mt-0.5">Upload or capture a classroom photo. Our AI will recognize all students.</p>
-                            </div>
+                            <button
+                                onClick={() => setIsDualCameraModalOpen(true)}
+                                className="bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 hover:border-primary/40 px-4 py-2.5 rounded-xl font-bold text-sm tracking-wide transition-all shadow-none flex items-center gap-2"
+                            >
+                                <Video className="w-4 h-4" /> 2-Camera Sync
+                            </button>
                         </div>
 
                         {/* Photo UI */}
@@ -659,6 +670,10 @@ export default function LectureDetailPage({
                                             const record = attendanceRecords.find(r =>
                                                 (r.studentId?._id?.toString() || r.studentId?.toString()) === student._id?.toString()
                                             );
+                                            const pct = record?.attendancePercentage || 0;
+                                            const mins = record?.totalPresentMinutes || 0;
+                                            const strokeColor = pct > 75 ? '#34d399' : pct > 40 ? '#fbbf24' : '#f87171';
+
                                             return (
                                                 <motion.div
                                                     key={student._id}
@@ -683,14 +698,30 @@ export default function LectureDetailPage({
                                                             </div>
                                                         </div>
                                                     </div>
-                                                    <div className="flex items-center gap-2 shrink-0">
-                                                        <span className="text-[10px] font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-full uppercase tracking-widest">
+
+                                                    <div className="flex items-center gap-4 shrink-0">
+                                                        {record?.attendancePercentage !== undefined && (
+                                                            <div className="flex items-center gap-2 mr-2">
+                                                                <div className="text-right">
+                                                                    <p className="text-[10px] uppercase font-black tracking-widest text-white/40">Present Time</p>
+                                                                    <p className="text-xs font-bold font-mono text-emerald-300">{mins}m ({pct}%)</p>
+                                                                </div>
+                                                                <div className="w-8 h-8 relative flex items-center justify-center">
+                                                                    <svg className="w-full h-full -rotate-90">
+                                                                        <circle cx="16" cy="16" r="14" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="3" />
+                                                                        <circle cx="16" cy="16" r="14" fill="none" stroke={strokeColor} strokeWidth="3"
+                                                                            strokeDasharray={`${pct * 0.88} 100`} />
+                                                                    </svg>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                        <span className="text-[10px] font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-full uppercase tracking-widest shrink-0">
                                                             Present
                                                         </span>
                                                         <button
                                                             onClick={() => updateAttendance(student._id, 'ABSENT')}
                                                             disabled={updatingId === student._id}
-                                                            className="p-2 rounded-xl bg-red-500/5 hover:bg-red-500/15 border border-red-500/10 hover:border-red-500/30 transition-all disabled:opacity-40"
+                                                            className="p-2 rounded-xl bg-red-500/5 hover:bg-red-500/15 border border-red-500/10 hover:border-red-500/30 transition-all disabled:opacity-40 shrink-0"
                                                             title="Mark Absent"
                                                         >
                                                             {updatingId === student._id
@@ -714,41 +745,56 @@ export default function LectureDetailPage({
                                         Absent ({absentStudents.length})
                                     </h3>
                                     <div className="space-y-2">
-                                        {absentStudents.map((student: any, i: number) => (
-                                            <motion.div
-                                                key={student._id}
-                                                initial={{ opacity: 0, x: -12 }}
-                                                animate={{ opacity: 1, x: 0 }}
-                                                transition={{ delay: i * 0.04 }}
-                                                className="glass-card p-4 rounded-[20px] border-red-500/5 flex items-center justify-between gap-4 transition-all"
-                                            >
-                                                <div className="flex items-center gap-3">
-                                                    <div className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-sm font-black text-white/40 shrink-0">
-                                                        {student.fullName?.charAt(0).toUpperCase()}
+                                        {absentStudents.map((student: any, i: number) => {
+                                            const record = attendanceRecords.find(r => r.studentId === student._id);
+                                            const pct = record?.attendancePercentage || 0;
+                                            const mins = record?.totalPresentMinutes || 0;
+
+                                            return (
+                                                <motion.div
+                                                    key={student._id}
+                                                    initial={{ opacity: 0, x: -12 }}
+                                                    animate={{ opacity: 1, x: 0 }}
+                                                    transition={{ delay: i * 0.04 }}
+                                                    className="glass-card p-4 rounded-[20px] border-red-500/5 flex items-center justify-between gap-4 transition-all"
+                                                >
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-sm font-black text-white/40 shrink-0">
+                                                            {student.fullName?.charAt(0).toUpperCase()}
+                                                        </div>
+                                                        <div className="min-w-0">
+                                                            <p className="text-sm font-bold truncate">{student.fullName}</p>
+                                                            <p className="text-[11px] text-white/30 truncate">{student.prn || student.email}</p>
+                                                        </div>
                                                     </div>
-                                                    <div className="min-w-0">
-                                                        <p className="text-sm font-bold truncate">{student.fullName}</p>
-                                                        <p className="text-[11px] text-white/30 truncate">{student.prn || student.email}</p>
+
+                                                    <div className="flex items-center gap-4 shrink-0">
+                                                        {record?.attendancePercentage !== undefined && (
+                                                            <div className="flex items-center gap-2 mr-2">
+                                                                <div className="text-right">
+                                                                    <p className="text-[10px] uppercase font-black tracking-widest text-white/40">Present Time</p>
+                                                                    <p className="text-xs font-bold font-mono text-white/60">{mins}m ({pct}%)</p>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                        <span className="text-[10px] font-black text-red-400/70 bg-red-500/5 border border-red-500/15 px-3 py-1.5 rounded-full uppercase tracking-widest">
+                                                            Absent
+                                                        </span>
+                                                        <button
+                                                            onClick={() => updateAttendance(student._id, 'PRESENT')}
+                                                            disabled={updatingId === student._id}
+                                                            className="p-2 rounded-xl bg-emerald-500/5 hover:bg-emerald-500/15 border border-emerald-500/10 hover:border-emerald-500/30 transition-all disabled:opacity-40"
+                                                            title="Mark Present"
+                                                        >
+                                                            {updatingId === student._id
+                                                                ? <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
+                                                                : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400/60 hover:text-emerald-400 transition-colors" />
+                                                            }
+                                                        </button>
                                                     </div>
-                                                </div>
-                                                <div className="flex items-center gap-2 shrink-0">
-                                                    <span className="text-[10px] font-black text-red-400/70 bg-red-500/5 border border-red-500/15 px-3 py-1.5 rounded-full uppercase tracking-widest">
-                                                        Absent
-                                                    </span>
-                                                    <button
-                                                        onClick={() => updateAttendance(student._id, 'PRESENT')}
-                                                        disabled={updatingId === student._id}
-                                                        className="p-2 rounded-xl bg-emerald-500/5 hover:bg-emerald-500/15 border border-emerald-500/10 hover:border-emerald-500/30 transition-all disabled:opacity-40"
-                                                        title="Mark Present"
-                                                    >
-                                                        {updatingId === student._id
-                                                            ? <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
-                                                            : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400/60 hover:text-emerald-400 transition-colors" />
-                                                        }
-                                                    </button>
-                                                </div>
-                                            </motion.div>
-                                        ))}
+                                                </motion.div>
+                                            );
+                                        })}
                                     </div>
                                 </div>
                             )}

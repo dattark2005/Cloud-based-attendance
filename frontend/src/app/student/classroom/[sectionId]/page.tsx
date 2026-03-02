@@ -20,6 +20,8 @@ interface AttendanceRecord {
     lectureId?: { _id: string };
     status: 'PRESENT' | 'ABSENT';
     markedAt: string;
+    totalPresentMinutes?: number;
+    attendancePercentage?: number;
 }
 
 export default function StudentClassroomPage() {
@@ -248,6 +250,27 @@ export default function StudentClassroomPage() {
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-2 shrink-0">
+                                            {record?.attendancePercentage !== undefined ? (() => {
+                                                const pct = record.attendancePercentage;
+                                                const strokeColor = pct >= 75 ? '#34d399' : pct >= 50 ? '#fbbf24' : '#f87171';
+                                                return (
+                                                    <div className="flex items-center gap-2 mr-2">
+                                                        <div className="text-right">
+                                                            <p className="text-[10px] uppercase font-black tracking-widest text-white/40">Active Time</p>
+                                                            <p className={`text-xs font-bold font-mono ${pct >= 75 ? 'text-emerald-300' : pct >= 50 ? 'text-amber-300' : 'text-rose-300'}`}>
+                                                                {pct}%
+                                                            </p>
+                                                        </div>
+                                                        <div className="w-8 h-8 relative flex items-center justify-center">
+                                                            <svg className="w-full h-full -rotate-90">
+                                                                <circle cx="16" cy="16" r="14" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="3" />
+                                                                <circle cx="16" cy="16" r="14" fill="none" stroke={strokeColor} strokeWidth="3"
+                                                                    strokeDasharray={`${pct * 0.88} 100`} />
+                                                            </svg>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })() : null}
                                             <span className={`text-[10px] font-black px-3 py-1 rounded-full border ${isPresent ? 'border-emerald-500/25 text-emerald-400 bg-emerald-500/8' : isAbsent ? 'border-rose-500/20 text-rose-400 bg-rose-500/5' : 'border-white/8 text-white/25 bg-white/3'}`}>
                                                 {isPresent ? 'PRESENT' : isAbsent ? 'ABSENT' : 'PENDING'}
                                             </span>

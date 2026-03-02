@@ -21,9 +21,18 @@ const attendanceRecordSchema = new mongoose.Schema({
     enum: Object.values(ATTENDANCE_STATUS),
     default: ATTENDANCE_STATUS.PRESENT,
   },
-  cumulativeDurationMinutes: {
+   cumulativeDurationMinutes: {
     type: Number,
     default: 0,
+  },
+  // Used by the 2-camera video processing system
+  totalPresentMinutes: {
+    type: Number,
+    default: 0
+  },
+  attendancePercentage: {
+    type: Number,
+    default: 0
   },
   entryExitCount: {
     type: Number,

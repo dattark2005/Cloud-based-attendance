@@ -89,7 +89,6 @@ const ALL_OPTIONS = [
         id: 'scan_face' as ViewState,
         icon: Scan,
         label: 'Scan Face',
-        subtitle: 'Quick & secure check-in',
         gradient: 'from-blue-600 to-cyan-500',
         glow: 'shadow-blue-500/25',
         border: 'border-blue-500/20',
@@ -100,8 +99,7 @@ const ALL_OPTIONS = [
     {
         id: 'voice_face' as ViewState,
         icon: Mic,
-        label: 'Voice & Face',
-        subtitle: 'Dual biometric — max security',
+        label: 'Voice Attendance',
         gradient: 'from-purple-600 to-pink-600',
         glow: 'shadow-purple-500/25',
         border: 'border-purple-500/20',
@@ -274,23 +272,22 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     };
 
     const submitVoiceFaceAttendance = async () => {
-        if (!capturedImage) { toast.error('Please capture your face first.'); return; }
+        if (!audioBase64) { toast.error('Please record your voice first.'); return; }
         setView('processing');
         try {
-            const body: Record<string, string> = { faceImage: capturedImage };
-            if (audioBase64) body.voiceAudio = audioBase64;
+            const body: Record<string, string> = { voiceAudio: audioBase64 };
             if (lectureId) body.lectureId = lectureId;
-            const res = await fetchWithAuth('/teacher-attendance/mark', {
+            const res = await fetchWithAuth('/teacher-attendance/mark-voice', {
                 method: 'POST',
                 body: JSON.stringify(body),
             });
             if (res.success) {
                 setView('success');
-                toast.success('âœ… Dual biometric attendance marked!');
+                toast.success('🎉 Voice attendance and Anti-Spoofing passed!');
                 onSuccess?.();
                 setTimeout(onClose, 2600);
             }
-        } catch (err: unknown) {
+        } catch (err: any) {
             const msg = err instanceof Error ? err.message : 'An error occurred';
             if (msg.includes('already marked')) {
                 setView('already_marked');
@@ -298,11 +295,21 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                 onSuccess?.();
                 fetchStatus();
                 setTimeout(onClose, 2200);
+            } else if (err.isSpoofed || msg.includes('Spoofing') || msg.includes('Playback')) {
+                setCapturedImage(null);
+                resetVoice();
+                setView('voice_face');
+                toast.error('🛑 Anti-Spoofing Activated: Playback or AI Voice Detected.', { duration: 6000 });
+            } else if (msg.includes('not registered')) {
+                setStatusData(prev => prev ? { ...prev, voiceRegistered: false } : prev);
+                resetVoice();
+                setView('hub');
+                toast.error('Voice not registered. Please set it up in your Profile.', { duration: 5000 });
             } else {
                 setCapturedImage(null);
                 resetVoice();
                 setView('voice_face');
-                toast.error(msg || 'Verification failed. Try again.');
+                toast.error(msg || 'Voice verification failed. Try speaking clearer.');
             }
         }
     };
@@ -643,16 +650,15 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                                     <Sparkles className="w-5 h-5 text-purple-400" />
                                                 </div>
                                                 <div>
-                                                    <p className="font-black text-sm">Voice &amp; Face Verification</p>
-                                                    <p className="text-[11px] text-white/40">Dual biometric for maximum security</p>
+                                                    <p className="font-black text-sm">Voice Attendance Verification</p>
+                                                    <p className="text-[11px] text-white/40">Powered by DSP Liveness Detection</p>
                                                 </div>
                                             </div>
 
                                             {/* Step indicators */}
                                             <div className="flex items-center gap-2">
                                                 {[
-                                                    { step: 1, label: 'Voice', done: !!audioBase64, icon: Mic },
-                                                    { step: 2, label: 'Face', done: !!capturedImage, icon: Camera },
+                                                    { step: 1, label: 'Record Voice Phrase', done: !!audioBase64, icon: Mic },
                                                 ].map((s, i) => {
                                                     const SIcon = s.icon;
                                                     return (
@@ -662,7 +668,6 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                                                 <span>Step {s.step}: {s.label}</span>
                                                                 {s.done && <CheckCircle2 className="w-3.5 h-3.5" />}
                                                             </div>
-                                                            {i === 0 && <div className="flex-1 h-px bg-white/10" />}
                                                         </React.Fragment>
                                                     );
                                                 })}
@@ -670,7 +675,13 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
 
                                             {/* Voice recorder section */}
                                             <div className="rounded-3xl bg-white/3 border border-white/8 p-5 space-y-4">
-                                                <p className="text-[11px] text-white/40 font-bold uppercase tracking-widest">Step 1 â€” Voice Sample</p>
+                                                <p className="text-[11px] text-white/40 font-bold uppercase tracking-widest text-center">Please read:</p>
+                                                <div className="bg-purple-500/10 border border-purple-500/20 px-4 py-3 rounded-2xl text-center mb-2">
+                                                    <p className="font-mono text-purple-200 font-bold text-sm">
+                                                        {/* "I want to mark my attendance through my voice." */}
+                                                        "I am present."
+                                                    </p>
+                                                </div>
 
                                                 {!audioBase64 ? (
                                                     <div className="flex flex-col items-center gap-4">
@@ -743,14 +754,15 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                                 )}
                                             </div>
 
-                                            {/* Face capture section */}
-                                            <div className="rounded-3xl bg-white/3 border border-white/8 p-5 space-y-4">
-                                                <p className="text-[11px] text-white/40 font-bold uppercase tracking-widest">Step 2 â€” Face Capture</p>
-                                                <WebcamView
-                                                    onSubmit={submitVoiceFaceAttendance}
-                                                    submitLabel="Verify & Mark Present"
-                                                    submitColor="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 shadow-purple-500/20"
-                                                />
+                                            <div className="flex gap-3 mt-4">
+                                                <button
+                                                    onClick={submitVoiceFaceAttendance}
+                                                    disabled={!audioBase64}
+                                                    className={`w-full flex items-center justify-center gap-2 text-white py-4 rounded-2xl font-bold transition-all shadow-lg disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 shadow-purple-500/20`}
+                                                >
+                                                    <CheckCircle2 className="w-5 h-5" />
+                                                    <span>Verify Voice & Mark Present</span>
+                                                </button>
                                             </div>
                                         </motion.div>
                                     )}

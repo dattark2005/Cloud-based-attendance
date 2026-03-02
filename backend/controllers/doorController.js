@@ -1,8 +1,9 @@
 const EntryExitLog = require('../models/EntryExitLog');
 const Lecture = require('../models/Lecture');
 const User = require('../models/User');
+const AttendanceRecord = require('../models/AttendanceRecord');
 const { broadcastToSection } = require('../utils/socket');
-const { LECTURE_STATUS } = require('../config/constants');
+const { LECTURE_STATUS, VERIFICATION_METHODS } = require('../config/constants');
 
 /**
  * Camera script POSTs here when a face is detected at a door.
@@ -59,6 +60,66 @@ const logDoorEvent = async (req, res, next) => {
             timestamp: log.timestamp,
             roomNumber,
         };
+
+        // If it's an EXIT, or if we just want to ensure AttendanceRecord is updated in real-time
+        if (type === 'ENTRY' || type === 'EXIT') {
+            // Re-calculate their total present time so far
+            const userLogs = await EntryExitLog.find({ lectureId: lecture._id, userId: studentId }).sort({ timestamp: 1 });
+            let totalMs = 0;
+            let lastEntry = null;
+
+            for (const ev of userLogs) {
+                if (ev.type === 'ENTRY') {
+                    lastEntry = new Date(ev.timestamp);
+                } else if (ev.type === 'EXIT' && lastEntry) {
+                    totalMs += new Date(ev.timestamp).getTime() - lastEntry.getTime();
+                    lastEntry = null;
+                }
+            }
+
+            // If still inside, count until now
+            if (lastEntry) {
+                totalMs += Date.now() - lastEntry.getTime();
+            }
+
+            const totalMins = Math.round(totalMs / 60000);
+            
+            // Calculate Percentage based on Lecture length
+            let durationMins = 60; // default
+            if (lecture.scheduledStart && lecture.scheduledEnd) {
+                durationMins = Math.round((new Date(lecture.scheduledEnd).getTime() - new Date(lecture.scheduledStart).getTime()) / 60000);
+                if (durationMins <= 0) durationMins = 60;
+            }
+            
+            let percentage = Math.round((totalMins / durationMins) * 100);
+            if (percentage > 100) percentage = 100;
+            if (percentage < 0) percentage = 0;
+
+            // Upsert Attendance Record instantly
+            await AttendanceRecord.findOneAndUpdate(
+                { lectureId: lecture._id, studentId: studentId },
+                {
+                    $set: {
+                        status: 'PRESENT', // Mark present if they were seen
+                        totalPresentMinutes: totalMins,
+                        attendancePercentage: percentage,
+                        verificationMethod: VERIFICATION_METHODS.FACE,
+                        markedAt: new Date()
+                    }
+                },
+                { upsert: true, new: true }
+            );
+
+            // Inform the client of their updated percentage
+            payload.totalPresentMinutes = totalMins;
+            payload.attendancePercentage = percentage;
+            
+            // Trigger frontend attendance grid to refresh instantly
+            broadcastToSection(lecture.sectionId._id.toString(), 'attendance:updated', {
+                lectureId: lecture._id,
+                studentId: studentId
+            });
+        }
 
         // Broadcast to ALL clients in this section (teacher + student) — instantly
         broadcastToSection(lecture.sectionId._id.toString(), 'door:event', payload);
@@ -202,4 +263,83 @@ const getActiveLectureStudents = async (req, res, next) => {
     }
 };
 
-module.exports = { logDoorEvent, getLectureLog, getMyLog, getActiveLectureStudents };
+const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
+const FormData = require('form-data');
+
+/**
+ * Process uploaded inside/outside videos to calculate attendance percentage
+ * POST /api/door/process-videos/:lectureId
+ */
+const processVideos = async (req, res, next) => {
+    try {
+        const { lectureId } = req.params;
+        const insideFile = req.files?.insideVideo?.[0];
+        const outsideFile = req.files?.outsideVideo?.[0];
+
+        if (!insideFile || !outsideFile) {
+            return res.status(400).json({ success: false, message: 'Both insideVideo and outsideVideo files are required' });
+        }
+
+        const lecture = await Lecture.findById(lectureId).populate('sectionId', 'students');
+        if (!lecture) return res.status(404).json({ success: false, message: 'Lecture not found' });
+
+        // Build a list of enrolled student encodings to limit search
+        const enrolledStudents = lecture.sectionId.students || [];
+
+        // Forward to python service (FastAPI)
+        const formData = new FormData();
+        formData.append('inside_video', fs.createReadStream(insideFile.path));
+        formData.append('outside_video', fs.createReadStream(outsideFile.path));
+        formData.append('lecture_id', lectureId);
+        
+        // Pass enrolled students list to restrict matching pool
+        formData.append('enrolled_students', JSON.stringify(enrolledStudents));
+        
+        // Let's assume the Python face service is running at 8000
+        const pythonServiceUrl = process.env.FACE_SERVICE_URL || 'http://localhost:8000';
+        
+        const response = await axios.post(`${pythonServiceUrl}/process-dual-video`, formData, {
+            headers: formData.getHeaders(),
+            timeout: 5 * 60 * 1000 // 5 minutes timeout for heavy video processing
+        });
+
+        const { success, results } = response.data;
+        if (!success || !results) {
+             throw new Error('Python processor failed to analyze videos');
+        }
+
+        // Processing results updating MongoDB
+        const updatePromises = results.map(async (studentLog) => {
+            const { studentId, totalPresentMinutes, attendancePercentage } = studentLog;
+
+            return AttendanceRecord.findOneAndUpdate(
+                { lectureId, studentId },
+                { 
+                    status: attendancePercentage > 0 ? ATTENDANCE_STATUS.PRESENT : ATTENDANCE_STATUS.ABSENT,
+                    totalPresentMinutes,
+                    attendancePercentage,
+                    markedAt: new Date()
+                },
+                { upsert: true, new: true }
+            );
+        });
+
+        await Promise.all(updatePromises);
+        
+        // Cleanup temp files
+        fs.unlinkSync(insideFile.path);
+        fs.unlinkSync(outsideFile.path);
+
+        res.json({ success: true, message: 'Videos processed perfectly', data: results });
+    } catch (error) {
+        // Cleanup temp files on error
+        if (req.files?.insideVideo?.[0]) fs.unlinkSync(req.files.insideVideo[0].path).catch(()=>{});
+        if (req.files?.outsideVideo?.[0]) fs.unlinkSync(req.files.outsideVideo[0].path).catch(()=>{});
+        
+        next(error);
+    }
+};
+
+module.exports = { logDoorEvent, getLectureLog, getMyLog, getActiveLectureStudents, processVideos };

@@ -2,6 +2,10 @@ const TeacherAttendance = require('../models/TeacherAttendance');
 const User = require('../models/User');
 const { verifyFace, registerFace: registerFaceWithService } = require('../utils/apiClient');
 const { registerUserFace } = require('./biometricController');
+const FormData = require('form-data');
+const axios = require('axios');
+
+const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL || 'http://localhost:8000';
 
 /**
  * Get today's date string in YYYY-MM-DD
@@ -220,6 +224,151 @@ const registerTeacherFace = registerUserFace;
 // Legacy export name kept for backward compatibility
 const registerFace = registerTeacherFace;
 
+/**
+ * POST /api/teacher-attendance/register-voice
+ * Forwards audio base64 to Python service to get MFCC embedding
+ */
+const registerTeacherVoice = async (req, res, next) => {
+    try {
+        const teacherId = req.user._id;
+        const { voiceAudio } = req.body;
+        
+        if (!voiceAudio) {
+            return res.status(400).json({ success: false, message: 'Voice audio string is required' });
+        }
+
+        // Remove the data:audio/webm;base64, prefix
+        const base64Data = voiceAudio.replace(/^data:audio\/\w+;base64,/, "");
+        const audioBuffer = Buffer.from(base64Data, 'base64');
+
+        const formData = new FormData();
+        formData.append('file', audioBuffer, {
+            filename: 'registration_audio.webm',
+            contentType: 'audio/webm'
+        });
+
+        const pythonRes = await axios.post(`${FACE_SERVICE_URL}/register-voice`, formData, {
+            headers: {
+                ...formData.getHeaders(),
+            },
+        });
+
+        const data = pythonRes.data;
+        if (!data.success || !data.embedding) {
+            return res.status(400).json({ success: false, message: data.message || 'Voice registration failed in Python service' });
+        }
+
+        const binaryStr = JSON.stringify(data.embedding);
+        const floatArray = JSON.parse(binaryStr);
+        // Save to DB
+        await User.findByIdAndUpdate(teacherId, {
+            voiceEmbedding: Buffer.from(Float32Array.from(floatArray).buffer),
+            voiceRegisteredAt: new Date(),
+        });
+
+        res.json({ success: true, message: 'Voice Biometrics registered successfully' });
+    } catch (error) {
+        if (error.response && error.response.data) {
+             return res.status(error.response.status).json({ success: false, message: error.response.data.detail || error.message });
+        }
+        next(error);
+    }
+};
+
+/**
+ * POST /api/teacher-attendance/mark-voice
+ * Verifies voice and checks Liveness/Anti-Spoofing
+ */
+const markVoiceAttendance = async (req, res, next) => {
+    try {
+        const teacherId = req.user._id;
+        const { lectureId = null, voiceAudio } = req.body;
+
+        if (!voiceAudio) {
+            return res.status(400).json({ success: false, message: 'Voice audio string is required' });
+        }
+
+        const today = getTodayDateString();
+
+        // Check already marked
+        const existing = await TeacherAttendance.findOne({ teacherId, date: today, lectureId: lectureId || null });
+        if (existing) {
+            return res.status(400).json({ success: false, message: 'Attendance already marked for today', data: { record: existing } });
+        }
+
+        // Fetch user embedding
+        const teacher = await User.findById(teacherId).select('+voiceEmbedding');
+        if (!teacher || !teacher.voiceEmbedding) {
+            return res.status(400).json({
+                success: false,
+                message: 'Voice not registered. Please register your voice first in profile settings.',
+                data: { voiceNotRegistered: true },
+            });
+        }
+
+        // Convert stored buffer back to JSON array of floats for Python
+        const storedFloat32 = new Float32Array(teacher.voiceEmbedding.buffer, teacher.voiceEmbedding.byteOffset, teacher.voiceEmbedding.length / 4);
+        const expectedEmbeddingStr = JSON.stringify(Array.from(storedFloat32));
+
+        // Format base64 back into buffer
+        const base64Data = voiceAudio.replace(/^data:audio\/\w+;base64,/, "");
+        const audioBuffer = Buffer.from(base64Data, 'base64');
+
+        const formData = new FormData();
+        formData.append('file', audioBuffer, {
+            filename: 'verification_audio.webm',
+            contentType: 'audio/webm'
+        });
+        formData.append('teacher_id', teacherId.toString());
+        formData.append('expected_embedding', expectedEmbeddingStr);
+
+        const pythonRes = await axios.post(`${FACE_SERVICE_URL}/verify-voice`, formData, {
+            headers: {
+                ...formData.getHeaders(),
+            },
+        });
+
+        const data = pythonRes.data;
+
+        if (!data.success) {
+            if (data.isSpoofed) {
+                return res.status(403).json({
+                    success: false,
+                    isSpoofed: true,
+                    message: data.message || 'Liveness check failed. Playback spoofing detected.'
+                });
+            }
+            return res.status(400).json({
+                success: false,
+                message: data.message || 'Voice verification failed (low confidence)',
+                data: { confidence: data.confidence }
+            });
+        }
+
+        // Mark Attendance
+        const record = await TeacherAttendance.create({
+            teacherId,
+            date: today,
+            status: 'PRESENT',
+            lectureId: lectureId || null,
+            verificationMethod: 'VOICE',
+            confidenceScore: data.confidence, // High accuracy score > 0.85
+        });
+
+        res.json({
+            success: true,
+            message: 'Voice Attendance marked successfully',
+            data: { record, confidence: data.confidence }
+        });
+
+    } catch (error) {
+        if (error.response && error.response.data) {
+             return res.status(error.response.status).json({ success: false, message: error.response.data.detail || error.message });
+        }
+        next(error);
+    }
+};
+
 module.exports = {
     getTodayStatus,
     markAttendance,
@@ -227,4 +376,6 @@ module.exports = {
     getMyAttendance,
     registerFace,
     registerTeacherFace,
+    registerTeacherVoice,
+    markVoiceAttendance
 };

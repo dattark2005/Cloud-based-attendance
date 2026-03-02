@@ -39,6 +39,16 @@ router.use(authenticate);
 // Teacher: full log for a lecture with computed time-in-class per student
 router.get('/lecture/:lectureId', isTeacher, getLectureLog);
 
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' }); // Temporary storage for videos
+
+// Teacher: process videos to calculate attendance percentage
+const { processVideos } = require('../controllers/doorController');
+router.post('/process-videos/:lectureId', isTeacher, upload.fields([
+    { name: 'insideVideo', maxCount: 1 },
+    { name: 'outsideVideo', maxCount: 1 }
+]), processVideos);
+
 // Student: own log for a lecture
 router.get('/my/:lectureId', getMyLog);
 

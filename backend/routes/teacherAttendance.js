@@ -42,4 +42,16 @@ router.post(
     registerTeacherFace || registerFace
 );
 
+// POST /api/teacher-attendance/register-voice
+router.post(
+    '/register-voice',
+    require('../controllers/teacherAttendanceController').registerTeacherVoice
+);
+
+// POST /api/teacher-attendance/mark-voice
+router.post(
+    '/mark-voice',
+    require('../controllers/teacherAttendanceController').markVoiceAttendance
+);
+
 module.exports = router;

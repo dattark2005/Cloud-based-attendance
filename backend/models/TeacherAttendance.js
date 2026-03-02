@@ -30,7 +30,7 @@ const teacherAttendanceSchema = new mongoose.Schema(
         },
         verificationMethod: {
             type: String,
-            enum: ['FACE', 'MANUAL', 'FACE_LOCAL'],
+            enum: ['FACE', 'MANUAL', 'FACE_LOCAL', 'VOICE'],
             default: 'FACE',
         },
         confidenceScore: {
