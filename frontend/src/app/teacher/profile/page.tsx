@@ -62,6 +62,15 @@ export default function TeacherProfilePage() {
     const audioChunks = useRef<Blob[]>([]);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
 
+    // Voice verification sentence
+    const voicePhrases = [
+        // "Cloud Attendance System initializing my voice print.",
+        // "My voice is my password for the attendance portal.",
+        // "Authenticating teacher biometrics securely now.",
+        "I want to mark my attendance through my voice."
+    ];
+    const [currentPhrase, setCurrentPhrase] = useState(voicePhrases[0]);
+
     const fetchUser = useCallback(async () => {
         try {
             const res = await fetchWithAuth('/auth/me');
@@ -111,6 +120,7 @@ export default function TeacherProfilePage() {
             setIsRecording(true);
             setAudioDuration(0);
             timerRef.current = setInterval(() => setAudioDuration(p => p + 1), 1000);
+            setCurrentPhrase(voicePhrases[Math.floor(Math.random() * voicePhrases.length)]);
         } catch {
             toast.error('Microphone access denied');
         }
@@ -169,7 +179,7 @@ export default function TeacherProfilePage() {
         if (!audioBase64) { toast.error('Please record a voice sample first'); return; }
         setRegisteringVoice(true);
         try {
-            const res = await fetchWithAuth('/biometric/voice/register', {
+            const res = await fetchWithAuth('/teacher-attendance/register-voice', {
                 method: 'POST',
                 body: JSON.stringify({ voiceAudio: audioBase64 }),
             });
@@ -498,7 +508,13 @@ export default function TeacherProfilePage() {
                                     {/* Recording card */}
                                     <div className="rounded-3xl bg-white/3 border border-white/8 p-8 flex flex-col items-center gap-6">
                                         <Sparkles className="w-6 h-6 text-purple-400 mb-1" />
-                                        <p className="text-sm text-white/40 text-center">Say a clear phrase in your normal voice.<br />Minimum 3 seconds recommended.</p>
+                                        <p className="text-sm text-white/40 text-center">To securely capture your vocal frequencies, please read the phrase below:<br />Minimum 3 seconds recommended.</p>
+
+                                        <div className="bg-purple-500/10 border border-purple-500/20 px-6 py-4 rounded-2xl max-w-sm text-center">
+                                            <p className="font-mono text-purple-200 font-bold text-lg leading-relaxed">
+                                                "{currentPhrase}"
+                                            </p>
+                                        </div>
 
                                         {!audioBase64 ? (
                                             <div className="flex flex-col items-center gap-4">

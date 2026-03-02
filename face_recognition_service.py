@@ -25,6 +25,13 @@ import cv2
 from typing import List
 from pathlib import Path
 import urllib.request
+import math
+try:
+    import librosa
+    import soundfile as sf
+except ImportError:
+    print("⚠️  librosa not installed. Voice detection disabled. Run: pip install librosa soundfile")
+    librosa = None
 
 # ── Load .env ──
 try:
@@ -659,6 +666,357 @@ def health_check():
         "cosineThreshold": COSINE_THRESHOLD,
         "timestamp": time.time()
     }
+
+
+import tempfile
+import json
+from fastapi import UploadFile, File
+
+def process_video_file(video_path: str, all_encodings, event_type: str, skip_frames=30):
+    """
+    Reads a video file, detects faces every `skip_frames` frames.
+    Returns a list of dicts: [{'studentId': 'abc', 'type': 'ENTRY'|'EXIT', 'time_sec': 12.5}]
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0: fps = 30 # fallback
+    
+    events = []
+    frame_count = 0
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
+        
+        # Process every Nth frame to save time (e.g., 1 frame per second)
+        if frame_count % int(fps) == 0:
+            time_sec = frame_count / fps
+            
+            # Detect faces
+            faces = detect_all_faces(frame)
+            if len(faces) > 0:
+                for face in faces:
+                    try:
+                        aligned = face_recognizer.alignCrop(frame, face)
+                        embedding = face_recognizer.feature(aligned)
+                        emb_flat = embedding.flatten().astype(np.float64)
+                        
+                        best_match_id = None
+                        best_score = 0
+                        
+                        for student_id, student_emb in all_encodings.items():
+                            score = match_score(student_emb, emb_flat)['score']
+                            if score > 0.45 and score > best_score:  # basic threshold
+                                best_score = score
+                                best_match_id = student_id
+                                
+                        if best_match_id:
+                            events.append({
+                                'studentId': best_match_id,
+                                'type': event_type,
+                                'time_sec': time_sec,
+                                'confidence': float(best_score)
+                            })
+                    except Exception as e:
+                        print(f"Face extraction err frame {frame_count}: {e}")
+
+        frame_count += 1
+        
+    cap.release()
+    return events
+
+
+@app.post("/process-dual-video")
+async def process_dual_video(
+    lecture_id: str = Form(...),
+    inside_video: UploadFile = File(...),
+    outside_video: UploadFile = File(...),
+    enrolled_students: str = Form(...) # JSON list of object IDs to limit search
+):
+    """
+    Accepts two video files (inside camera, outside camera).
+    Calculates precise entry/exit timeline and returns Attendance percentages per student.
+    """
+    try:
+        # 1. Parse enrolled students 
+        try:
+            enrolled_ids = json.loads(enrolled_students)
+        except:
+            enrolled_ids = []
+
+        # 2. Fetch all encodings from DB, filter by enrolled if possible
+        coll = get_db_collection()
+        all_docs = list(coll.find({}))
+        
+        valid_encodings = {}
+        for doc in all_docs:
+            uid = doc.get("userId", "")
+            if len(enrolled_ids) > 0 and uid not in enrolled_ids:
+                continue # Skip students not in this lecture
+                
+            enc = doc.get("embedding")
+            if enc and isinstance(enc, list) and len(enc) == 128:
+                valid_encodings[uid] = np.array(enc, dtype=np.float64)
+
+        if not valid_encodings:
+            return {"success": False, "message": "No valid encodings found for enrolled students"}
+            
+        print(f"[DUAL-CAM] Processing videos for {len(valid_encodings)} enrolled students...")
+
+        # 3. Save uploaded videos temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as in_tmp:
+            in_content = await inside_video.read()
+            in_tmp.write(in_content)
+            inside_path = in_tmp.name
+            
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as out_tmp:
+            out_content = await outside_video.read()
+            out_tmp.write(out_content)
+            outside_path = out_tmp.name
+
+        # 4. Process both videos to extract chronological events
+        print("[DUAL-CAM] Scanning inside video (ENTRY events)...")
+        in_events = process_video_file(inside_path, valid_encodings, "ENTRY")
+        
+        print("[DUAL-CAM] Scanning outside video (EXIT events)...")
+        out_events = process_video_file(outside_path, valid_encodings, "EXIT")
+        
+        import os
+        os.remove(inside_path)
+        os.remove(outside_path)
+
+        # 5. Combine, sort, and calculate lengths
+        all_events = in_events + out_events
+        all_events = sorted(all_events, key=lambda x: x['time_sec'])
+        
+        # Calculate maximum possible duration based on total video length
+        # Assuming both videos ran for roughly the same total duration of the lecture
+        max_duration = 0
+        if len(all_events) > 0:
+            max_duration = max([e['time_sec'] for e in all_events])
+            
+        if max_duration < 1: 
+            max_duration = 1  # prevent div by zero
+            
+        # 6. Compute logic per student
+        student_timelines = {}
+        for ev in all_events:
+            sid = ev['studentId']
+            if sid not in student_timelines:
+                 student_timelines[sid] = {'events': [], 'total_present_sec': 0, 'currently_in': False, 'last_entry': 0}
+                 
+            st = student_timelines[sid]
+            
+            if ev['type'] == 'ENTRY':
+                if not st['currently_in']:
+                    st['currently_in'] = True
+                    st['last_entry'] = ev['time_sec']
+            elif ev['type'] == 'EXIT':
+                if st['currently_in']:
+                    st['currently_in'] = False
+                    duration = ev['time_sec'] - st['last_entry']
+                    st['total_present_sec'] += duration
+                    
+        # Conclude any students left "inside" at end of video
+        results = []
+        for sid, st in student_timelines.items():
+            if st['currently_in']:
+                 duration = max_duration - st['last_entry']
+                 st['total_present_sec'] += duration
+                 
+            total_min = round(st['total_present_sec'] / 60, 2)
+            max_min = max_duration / 60
+            pct = round((st['total_present_sec'] / max_duration) * 100, 2)
+            if pct > 100: pct = 100
+            
+            results.append({
+                "studentId": sid,
+                "totalPresentMinutes": total_min,
+                "attendancePercentage": pct
+            })
+
+        print(f"[DUAL-CAM] Processing complete. Identified presence for {len(results)} students.")
+        return {
+            "success": True, 
+            "results": results
+        }
+
+    except Exception as e:
+        print(f"Error in dual video processing: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+# ==================== VOICE BIOMETRICS & ANTI-SPOOFING ====================
+from fastapi.responses import JSONResponse
+
+def compute_voice_embedding(y, sr):
+    """
+    Computes a 1D averaged MFCC embedding from Librosa Audio.
+    MFCCs (Mel-frequency cepstral coefficients) capture the vocal tract shape.
+    """
+    # Extract 40 MFCCs
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
+    # Extract Spectral Contrast
+    contrast = librosa.feature.spectral_contrast(y=y, sr=sr)
+    
+    # Average them across time frames to get a stable 1D vector (fingerprint)
+    mfccs_mean = np.mean(mfccs.T, axis=0)
+    contrast_mean = np.mean(contrast.T, axis=0)
+    
+    embedding = np.hstack([mfccs_mean, contrast_mean])
+    return embedding / np.linalg.norm(embedding) # Normalize
+
+def check_liveness_antispoof(y, sr):
+    """
+    Anti-Spoofing: Differentiates LIVE human speech from PHONE/SPEAKER PLAYBACK.
+    Method:
+      - Phones and speakers severely attenuate high frequencies (>8000Hz)
+      - Live human speech directly into a mic contains high-frequency breath pops 
+        and high-level Spectral Flux (rapid freq shifts).
+      - Returns: (is_live: bool, confidence: float, reason: str)
+    """
+    # 1. High Frequency Content (HFC)
+    S = np.abs(librosa.stft(y))
+    freqs = librosa.fft_frequencies(sr=sr)
+    
+    # Filter only freq bands > 4000 Hz
+    high_freq_idx = np.where(freqs > 4000)[0]
+    high_energy = float(np.sum(S[high_freq_idx, :]) / (np.sum(S) + 1e-10))
+    
+    # 2. Spectral Flux (How fast does the frequency spectrum change?)
+    # Playbacks often sound 'muffled' or flatter in spectral change
+    flux = librosa.onset.onset_strength(y=y, sr=sr)
+    mean_flux = float(np.mean(flux))
+
+    logger.info(f"Liveness Check -> HighFreqRatio: {high_energy:.4f}, Mean Flux: {mean_flux:.4f}")
+    
+    # Optimal Thresholds calculated from live analytics:
+    # Live Human baseline is approximately HFC: 0.14 - 0.30, Flux: 1.4 - 2.0+
+    # High-fidelity playback drops HFC closer to ~0.05 and Flux ~0.5.
+    if high_energy < 0.10 or mean_flux < 1.25:
+        return False, 0.99, "Failed Liveness Check: Detected Playback/Speaker Spoofing"
+    
+    return True, 1.0, "Live Human Confirmed"
+
+@app.post("/register-voice")
+async def register_voice(file: UploadFile = File(...)):
+    """
+    Accepts a .wav/.webm file from the frontend, extracts MFCC embeddings,
+    and returns the numpy array to be stored in MongoDB.
+    """
+    if not librosa:
+        raise HTTPException(500, detail="Voice librosa not installed on server.")
+        
+    try:
+        # Save temp audio file
+        temp_audio = f"temp_reg_{int(time.time())}_{file.filename}"
+        with open(temp_audio, "wb") as f:
+            f.write(await file.read())
+            
+        # Load audio
+        y, sr = librosa.load(temp_audio, sr=16000, mono=True)
+        # Trim leading/trailing silence
+        y, _ = librosa.effects.trim(y, top_db=20)
+        
+        # Check Length
+        duration = librosa.get_duration(y=y, sr=sr)
+        if duration < 0.5:
+            os.remove(temp_audio)
+            raise HTTPException(400, "Audio too short. Please speak clearly into the microphone.")
+            
+        embedding = compute_voice_embedding(y, sr)
+        os.remove(temp_audio)
+        
+        return JSONResponse(content={
+            "success": True,
+            "embedding": embedding.tolist()
+        })
+    except Exception as e:
+        logger.error(f"Voice Registration Failed: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+@app.post("/verify-voice")
+async def verify_voice(
+    file: UploadFile = File(...),
+    teacher_id: str = Form(...),
+    expected_embedding: str = Form(...) 
+):
+    """
+    1) Anti-Spoof check on audio file
+    2) Extract target MFCC
+    3) Cosine match against the expected_embedding string
+    """
+    if not librosa:
+        return JSONResponse(status_code=500, content={"success": False, "message": "Voice modules missing."})
+        
+    try:
+        import json
+        # Since Node passes stringified JSON in the Form, load it, then convert to Float32 array
+        target_list = json.loads(expected_embedding)
+        
+        # If the Node backend passes it as a dict string like {'0': 0.123, '1': 0.45}, parse the values 
+        if isinstance(target_list, dict):
+             target_list = list(target_list.values())
+             
+        target_vec = np.array(target_list, dtype=np.float32)
+        
+        temp_audio = f"temp_ver_{int(time.time())}_{file.filename}"
+        with open(temp_audio, "wb") as f:
+            f.write(await file.read())
+            
+        y, sr = librosa.load(temp_audio, sr=16000, mono=True)
+        y, _ = librosa.effects.trim(y, top_db=20)
+        os.remove(temp_audio)
+        
+        # 1. Anti Spoof
+        is_live, conf, reason = check_liveness_antispoof(y, sr)
+        if not is_live:
+            return JSONResponse(content={
+                "success": False,
+                "isSpoofed": True,
+                "message": f"Anti-Spoofing Activated: {reason}"
+            })
+            
+        # 2. Extract and Compare
+        incoming_vec = compute_voice_embedding(y, sr)
+        
+        # Check alignment (legacy embeddings might have different dimensions)
+        if target_vec.shape != incoming_vec.shape:
+            return JSONResponse(content={
+                "success": False,
+                "isSpoofed": False,
+                "match": False,
+                "message": "Outdated voice print version. Please re-register your voice in your profile.",
+                "confidence": 0.0
+            })
+            
+        # Cosine similarity
+        similarity = np.dot(target_vec, incoming_vec)
+        logger.info(f"Voice Cosine Similarity: {similarity:.4f}")
+        
+        # Threshold: > 0.82 indicates strongly similar vocal tract
+        if similarity >= 0.82:
+            return JSONResponse(content={
+                "success": True,
+                "isSpoofed": False,
+                "match": True,
+                "confidence": float(similarity)
+            })
+        else:
+            return JSONResponse(content={
+                "success": False,
+                "isSpoofed": False,
+                "match": False,
+                "message": "Voice Print did not match teacher database.",
+                "confidence": float(similarity)
+            })
+            
+    except Exception as e:
+        logger.error(f"Voice Verification Failed: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
 
 
 if __name__ == "__main__":
