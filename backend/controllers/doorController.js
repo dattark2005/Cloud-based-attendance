@@ -3,193 +3,286 @@ const Lecture = require('../models/Lecture');
 const User = require('../models/User');
 const AttendanceRecord = require('../models/AttendanceRecord');
 const { broadcastToSection } = require('../utils/socket');
-const { LECTURE_STATUS, VERIFICATION_METHODS } = require('../config/constants');
+const { LECTURE_STATUS, VERIFICATION_METHODS, ATTENDANCE_STATUS } = require('../config/constants');
 
-/**
- * Camera script POSTs here when a face is detected at a door.
- * Authenticated via DOOR_CAMERA_API_KEY (not JWT — cameras don't log in).
- * POST /api/door/event
- * Body: { roomNumber, studentId, type: 'ENTRY'|'EXIT', confidence }
- */
-const logDoorEvent = async (req, res, next) => {
+// ─────────────────────────────────────────────────────────────
+//  Helper: recalculate total SEEN time from presence log history
+// ─────────────────────────────────────────────────────────────
+async function calcPresentMinutes(lectureId, studentId) {
+    const logs = await EntryExitLog.find({
+        lectureId,
+        userId: studentId,
+        type: { $in: ['SEEN', 'ABSENT'] },
+    }).sort({ timestamp: 1 }).lean();
+
+    let totalMs = 0;
+    let lastSeen = null;
+
+    for (const log of logs) {
+        if (log.type === 'SEEN') {
+            // Each SEEN event counts for 1 scan interval (10 seconds)
+            // If we had a previous SEEN segment start, close it
+            if (lastSeen === null) lastSeen = new Date(log.timestamp);
+            // Keep tracking — presence continues
+        } else if (log.type === 'ABSENT') {
+            // Absent event: close the SEEN segment if open
+            if (lastSeen !== null) {
+                totalMs += new Date(log.timestamp).getTime() - lastSeen.getTime();
+                lastSeen = null;
+            }
+        }
+    }
+
+    // If still seen (no ABSENT at the end), count until now
+    if (lastSeen !== null) {
+        totalMs += Date.now() - lastSeen.getTime();
+    }
+
+    return Math.max(0, Math.round(totalMs / 60000));
+}
+
+// ─────────────────────────────────────────────────────────────
+//  NEW: POST /api/door/frame  (camera script → backend)
+//  Body: { frame: 'base64_string' }
+// ─────────────────────────────────────────────────────────────
+const logVideoFrame = async (req, res, next) => {
     try {
-        const { roomNumber, studentId, type, confidence } = req.body;
+        const { frame } = req.body;
+        if (!frame) return res.status(400).json({ success: false });
 
-        if (!roomNumber || !studentId || !type) {
-            return res.status(400).json({ success: false, message: 'roomNumber, studentId, and type are required' });
-        }
-        if (!['ENTRY', 'EXIT'].includes(type)) {
-            return res.status(400).json({ success: false, message: 'type must be ENTRY or EXIT' });
-        }
-
-        // Find the currently active lecture in this room
+        // Find active lecture across the system
         const lecture = await Lecture.findOne({
-            roomNumber,
             status: LECTURE_STATUS.ONGOING,
-        }).populate('sectionId', 'courseId');
+        }).populate('sectionId', '_id');
+
+        if (!lecture || !lecture.sectionId) {
+            console.log(`[DOOR CONTROLLER] Frame received but no ONGOING lecture found. Lecture doc:`, !!lecture);
+            return res.json({ success: true, message: 'No active lecture' });
+        }
+
+        // Broadcast frame to the specific section connected on frontend
+        // console.log(`[DOOR CONTROLLER] Broadcasting frame to section ${lecture.sectionId._id.toString()}`);
+
+        // Broadcast frame to the specific section connected on frontend
+        broadcastToSection(lecture.sectionId._id.toString(), 'camera:frame', frame);
+
+        res.json({ success: true });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
+//  1. POST /api/door/presence  (camera script → backend)
+//  Body: { roomNumber, studentId, status: 'SEEN'|'ABSENT', confidence }
+// ─────────────────────────────────────────────────────────────
+const logPresenceEvent = async (req, res, next) => {
+    try {
+        const { studentId, status, confidence } = req.body;
+
+        if (!studentId || !status) {
+            return res.status(400).json({
+                success: false,
+                message: 'studentId and status are required',
+            });
+        }
+        if (!['SEEN', 'ABSENT'].includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: 'status must be SEEN or ABSENT',
+            });
+        }
+
+        // Find active lecture across the system (single-camera setup)
+        const lecture = await Lecture.findOne({
+            status: LECTURE_STATUS.ONGOING,
+        }).populate('sectionId', 'courseId students');
 
         if (!lecture) {
-            // No active lecture in this room right now — ignore silently
-            return res.json({ success: true, message: 'No active lecture in this room, event ignored' });
+            // No active lecture — silently ignore
+            return res.json({ success: true, message: 'No active lecture, event ignored' });
         }
 
-        // Verify the student exists
+        // Verify student exists
         const student = await User.findById(studentId).select('fullName prn email');
         if (!student) {
             return res.status(404).json({ success: false, message: 'Student not found' });
         }
 
-        // Save the log
+        // Save presence log
         const log = await EntryExitLog.create({
             userId: studentId,
             lectureId: lecture._id,
-            type,
+            type: status,          // 'SEEN' or 'ABSENT'
             timestamp: new Date(),
             confidence: confidence || null,
             roomNumber,
         });
 
-        // Build the socket payload
+        // Recalculate present time
+        const totalPresentMinutes = await calcPresentMinutes(lecture._id, studentId);
+
+        // Calculate lecture duration
+        let durationMins = 60;
+        if (lecture.scheduledStart && lecture.scheduledEnd) {
+            durationMins = Math.max(1, Math.round(
+                (new Date(lecture.scheduledEnd) - new Date(lecture.scheduledStart)) / 60000
+            ));
+        }
+
+        const attendancePercentage = Math.min(100, Math.round((totalPresentMinutes / durationMins) * 100));
+
+        // Upsert AttendanceRecord
+        const updatedRecord = await AttendanceRecord.findOneAndUpdate(
+            { lectureId: lecture._id, studentId },
+            {
+                $set: {
+                    status: attendancePercentage > 0 ? ATTENDANCE_STATUS.PRESENT : ATTENDANCE_STATUS.ABSENT,
+                    totalPresentMinutes,
+                    attendancePercentage,
+                    verificationMethod: VERIFICATION_METHODS.FACE,
+                    markedAt: new Date(),
+                    lastSeenAt: status === 'SEEN' ? new Date() : undefined,
+                    currentlyPresent: status === 'SEEN',
+                },
+                $setOnInsert: { lectureId: lecture._id },
+            },
+            { upsert: true, new: true }
+        );
+
+        // Build socket payload
         const payload = {
-            logId: log._id,
             lectureId: lecture._id,
             studentId,
             studentName: student.fullName,
             studentPrn: student.prn || student.email,
-            type,           // 'ENTRY' | 'EXIT'
+            status,                          // 'SEEN' | 'ABSENT'
+            confidence: confidence || 0,
             timestamp: log.timestamp,
-            roomNumber,
+            totalPresentMinutes,
+            attendancePercentage,
+            currentlyPresent: status === 'SEEN',
+            roomNumber: lecture.roomNumber, // include room from lecture for socket event
         };
 
-        // If it's an EXIT, or if we just want to ensure AttendanceRecord is updated in real-time
-        if (type === 'ENTRY' || type === 'EXIT') {
-            // Re-calculate their total present time so far
-            const userLogs = await EntryExitLog.find({ lectureId: lecture._id, userId: studentId }).sort({ timestamp: 1 });
-            let totalMs = 0;
-            let lastEntry = null;
+        // Broadcast real-time update to all clients in this section
+        broadcastToSection(
+            lecture.sectionId._id.toString(),
+            'presence:update',
+            payload
+        );
 
-            for (const ev of userLogs) {
-                if (ev.type === 'ENTRY') {
-                    lastEntry = new Date(ev.timestamp);
-                } else if (ev.type === 'EXIT' && lastEntry) {
-                    totalMs += new Date(ev.timestamp).getTime() - lastEntry.getTime();
-                    lastEntry = null;
+        res.json({ success: true, message: `${status} logged`, data: payload });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
+//  2. GET /api/door/presence/:lectureId  (teacher fetches current state)
+// ─────────────────────────────────────────────────────────────
+const getPresenceStatus = async (req, res, next) => {
+    try {
+        const { lectureId } = req.params;
+
+        const lecture = await Lecture.findById(lectureId)
+            .populate({ path: 'sectionId', populate: { path: 'students', select: 'fullName prn email faceImageUrl' } });
+
+        if (!lecture) {
+            return res.status(404).json({ success: false, message: 'Lecture not found' });
+        }
+
+        const allStudents = lecture.sectionId?.students || [];
+
+        // Get the most recent presence log entry per student
+        const recentLogs = await EntryExitLog.aggregate([
+            {
+                $match: {
+                    lectureId: lecture._id,
+                    type: { $in: ['SEEN', 'ABSENT'] },
+                }
+            },
+            { $sort: { timestamp: -1 } },
+            {
+                $group: {
+                    _id: '$userId',
+                    lastStatus: { $first: '$type' },
+                    lastTimestamp: { $first: '$timestamp' },
+                    lastConfidence: { $first: '$confidence' },
                 }
             }
+        ]);
 
-            // If still inside, count until now
-            if (lastEntry) {
-                totalMs += Date.now() - lastEntry.getTime();
-            }
+        const logMap = {};
+        for (const l of recentLogs) {
+            logMap[l._id.toString()] = l;
+        }
 
-            const totalMins = Math.round(totalMs / 60000);
-            
-            // Calculate Percentage based on Lecture length
-            let durationMins = 60; // default
-            if (lecture.scheduledStart && lecture.scheduledEnd) {
-                durationMins = Math.round((new Date(lecture.scheduledEnd).getTime() - new Date(lecture.scheduledStart).getTime()) / 60000);
-                if (durationMins <= 0) durationMins = 60;
-            }
-            
-            let percentage = Math.round((totalMins / durationMins) * 100);
-            if (percentage > 100) percentage = 100;
-            if (percentage < 0) percentage = 0;
+        // Get attendance records for time data
+        const records = await AttendanceRecord.find({ lectureId }).lean();
+        const recordMap = {};
+        for (const r of records) {
+            recordMap[r.studentId.toString()] = r;
+        }
 
-            // Upsert Attendance Record instantly
-            await AttendanceRecord.findOneAndUpdate(
-                { lectureId: lecture._id, studentId: studentId },
-                {
-                    $set: {
-                        status: 'PRESENT', // Mark present if they were seen
-                        totalPresentMinutes: totalMins,
-                        attendancePercentage: percentage,
-                        verificationMethod: VERIFICATION_METHODS.FACE,
-                        markedAt: new Date()
-                    }
+        // Lecture duration
+        let durationMins = 60;
+        if (lecture.scheduledStart && lecture.scheduledEnd) {
+            durationMins = Math.max(1, Math.round(
+                (new Date(lecture.scheduledEnd) - new Date(lecture.scheduledStart)) / 60000
+            ));
+        }
+
+        // Build per-student status array
+        const studentStatuses = allStudents.map(student => {
+            const sid = student._id.toString();
+            const logEntry = logMap[sid];
+            const record = recordMap[sid];
+
+            return {
+                student: {
+                    _id: student._id,
+                    fullName: student.fullName,
+                    prn: student.prn || student.email,
+                    faceImageUrl: student.faceImageUrl,
                 },
-                { upsert: true, new: true }
-            );
+                currentStatus: logEntry?.lastStatus || null,   // 'SEEN' | 'ABSENT' | null
+                lastSeen: logEntry?.lastTimestamp || null,
+                lastConfidence: logEntry?.lastConfidence || 0,
+                totalPresentMinutes: record?.totalPresentMinutes || 0,
+                attendancePercentage: record?.attendancePercentage || 0,
+                currentlyPresent: logEntry?.lastStatus === 'SEEN',
+            };
+        });
 
-            // Inform the client of their updated percentage
-            payload.totalPresentMinutes = totalMins;
-            payload.attendancePercentage = percentage;
-            
-            // Trigger frontend attendance grid to refresh instantly
-            broadcastToSection(lecture.sectionId._id.toString(), 'attendance:updated', {
-                lectureId: lecture._id,
-                studentId: studentId
-            });
-        }
+        // Sort: currently present first, then absent, then undetected
+        studentStatuses.sort((a, b) => {
+            const order = { SEEN: 0, ABSENT: 1, null: 2 };
+            return (order[a.currentStatus] ?? 2) - (order[b.currentStatus] ?? 2);
+        });
 
-        // Broadcast to ALL clients in this section (teacher + student) — instantly
-        broadcastToSection(lecture.sectionId._id.toString(), 'door:event', payload);
-
-        res.json({ success: true, message: `${type} logged`, data: { log: payload } });
-    } catch (error) {
-        next(error);
-    }
-};
-
-/**
- * Get ALL entry/exit logs for a lecture (teacher view).
- * Also computes total time-in-class per student.
- * GET /api/door/lecture/:lectureId
- */
-const getLectureLog = async (req, res, next) => {
-    try {
-        const { lectureId } = req.params;
-
-        const logs = await EntryExitLog.find({ lectureId })
-            .populate('userId', 'fullName prn email')
-            .sort({ timestamp: 1 })
-            .lean();
-
-        // Group by student and compute total time in class
-        const studentMap = {};
-        for (const log of logs) {
-            const sid = log.userId._id.toString();
-            if (!studentMap[sid]) {
-                studentMap[sid] = {
-                    student: log.userId,
-                    events: [],
-                    totalMinutes: 0,
-                };
-            }
-            studentMap[sid].events.push({
-                type: log.type,
-                timestamp: log.timestamp,
-                logId: log._id,
-            });
-        }
-
-        // Calculate total in-class time per student
-        for (const sid of Object.keys(studentMap)) {
-            const events = studentMap[sid].events;
-            let totalMs = 0;
-            let lastEntry = null;
-
-            for (const ev of events) {
-                if (ev.type === 'ENTRY') {
-                    lastEntry = new Date(ev.timestamp);
-                } else if (ev.type === 'EXIT' && lastEntry) {
-                    totalMs += new Date(ev.timestamp) - lastEntry;
-                    lastEntry = null;
-                }
-            }
-
-            // If still inside (no exit yet), count until now
-            if (lastEntry) {
-                totalMs += Date.now() - lastEntry;
-            }
-
-            studentMap[sid].totalMinutes = Math.round(totalMs / 60000);
-        }
+        const presentCount = studentStatuses.filter(s => s.currentlyPresent).length;
+        const absentCount = studentStatuses.filter(s => s.currentStatus === 'ABSENT').length;
+        const unseenCount = studentStatuses.filter(s => !s.currentStatus).length;
 
         res.json({
             success: true,
             data: {
-                students: Object.values(studentMap),
-                totalLogs: logs.length,
+                lecture: {
+                    _id: lecture._id,
+                    status: lecture.status,
+                    scheduledStart: lecture.scheduledStart,
+                    scheduledEnd: lecture.scheduledEnd,
+                    durationMins,
+                    roomNumber: lecture.roomNumber,
+                },
+                stats: {
+                    total: allStudents.length,
+                    present: presentCount,
+                    absent: absentCount,
+                    unseen: unseenCount,
+                },
+                students: studentStatuses,
             },
         });
     } catch (error) {
@@ -197,58 +290,12 @@ const getLectureLog = async (req, res, next) => {
     }
 };
 
-/**
- * Get a student's own entry/exit log for a lecture.
- * GET /api/door/my/:lectureId
- */
-const getMyLog = async (req, res, next) => {
-    try {
-        const { lectureId } = req.params;
-        const studentId = req.user._id;
-
-        const logs = await EntryExitLog.find({ lectureId, userId: studentId })
-            .sort({ timestamp: 1 })
-            .lean();
-
-        // Compute total time in class
-        let totalMs = 0;
-        let lastEntry = null;
-        const events = logs.map(log => {
-            if (log.type === 'ENTRY') lastEntry = new Date(log.timestamp);
-            else if (log.type === 'EXIT' && lastEntry) {
-                totalMs += new Date(log.timestamp) - lastEntry;
-                lastEntry = null;
-            }
-            return { type: log.type, timestamp: log.timestamp };
-        });
-
-        if (lastEntry) totalMs += Date.now() - lastEntry;
-
-        res.json({
-            success: true,
-            data: {
-                events,
-                totalMinutes: Math.round(totalMs / 60000),
-            },
-        });
-    } catch (error) {
-        next(error);
-    }
-};
-
-/**
- * Get active lecture for a room and return enrolled student IDs.
- * Used by camera_monitor.py to pre-fetch IDs so the Python face service
- * only searches against enrolled students (much faster and no timeouts).
- * GET /api/door/lecture/active?room=:roomNumber
- */
+// ─────────────────────────────────────────────────────────────
+//  3. GET /api/door/lecture/active  (camera script pre-fetch)
+// ─────────────────────────────────────────────────────────────
 const getActiveLectureStudents = async (req, res, next) => {
     try {
-        const { room } = req.query;
-        if (!room) return res.status(400).json({ success: false, message: 'room query param required' });
-
         const lecture = await Lecture.findOne({
-            roomNumber: room,
             status: LECTURE_STATUS.ONGOING,
         }).populate('sectionId', 'students');
 
@@ -263,83 +310,145 @@ const getActiveLectureStudents = async (req, res, next) => {
     }
 };
 
-const fs = require('fs');
-const path = require('path');
-const axios = require('axios');
-const FormData = require('form-data');
-
-/**
- * Process uploaded inside/outside videos to calculate attendance percentage
- * POST /api/door/process-videos/:lectureId
- */
-const processVideos = async (req, res, next) => {
+// ─────────────────────────────────────────────────────────────
+//  4. GET /api/door/lecture/:lectureId  (legacy log view)
+// ─────────────────────────────────────────────────────────────
+const getLectureLog = async (req, res, next) => {
     try {
         const { lectureId } = req.params;
-        const insideFile = req.files?.insideVideo?.[0];
-        const outsideFile = req.files?.outsideVideo?.[0];
 
-        if (!insideFile || !outsideFile) {
-            return res.status(400).json({ success: false, message: 'Both insideVideo and outsideVideo files are required' });
+        const logs = await EntryExitLog.find({ lectureId })
+            .populate('userId', 'fullName prn email')
+            .sort({ timestamp: 1 })
+            .lean();
+
+        // Group by student
+        const studentMap = {};
+        for (const log of logs) {
+            const sid = log.userId._id.toString();
+            if (!studentMap[sid]) {
+                studentMap[sid] = { student: log.userId, events: [], totalMinutes: 0 };
+            }
+            studentMap[sid].events.push({ type: log.type, timestamp: log.timestamp });
         }
 
-        const lecture = await Lecture.findById(lectureId).populate('sectionId', 'students');
-        if (!lecture) return res.status(404).json({ success: false, message: 'Lecture not found' });
+        // Compute total present minutes per student (SEEN/ABSENT segments)
+        for (const sid of Object.keys(studentMap)) {
+            const events = studentMap[sid].events;
+            let totalMs = 0;
+            let lastSeen = null;
 
-        // Build a list of enrolled student encodings to limit search
-        const enrolledStudents = lecture.sectionId.students || [];
-
-        // Forward to python service (FastAPI)
-        const formData = new FormData();
-        formData.append('inside_video', fs.createReadStream(insideFile.path));
-        formData.append('outside_video', fs.createReadStream(outsideFile.path));
-        formData.append('lecture_id', lectureId);
-        
-        // Pass enrolled students list to restrict matching pool
-        formData.append('enrolled_students', JSON.stringify(enrolledStudents));
-        
-        // Let's assume the Python face service is running at 8000
-        const pythonServiceUrl = process.env.FACE_SERVICE_URL || 'http://localhost:8000';
-        
-        const response = await axios.post(`${pythonServiceUrl}/process-dual-video`, formData, {
-            headers: formData.getHeaders(),
-            timeout: 5 * 60 * 1000 // 5 minutes timeout for heavy video processing
-        });
-
-        const { success, results } = response.data;
-        if (!success || !results) {
-             throw new Error('Python processor failed to analyze videos');
+            for (const ev of events) {
+                if (ev.type === 'SEEN' || ev.type === 'ENTRY') {
+                    if (lastSeen === null) lastSeen = new Date(ev.timestamp);
+                } else if ((ev.type === 'ABSENT' || ev.type === 'EXIT') && lastSeen) {
+                    totalMs += new Date(ev.timestamp) - lastSeen;
+                    lastSeen = null;
+                }
+            }
+            if (lastSeen) totalMs += Date.now() - lastSeen;
+            studentMap[sid].totalMinutes = Math.round(totalMs / 60000);
         }
 
-        // Processing results updating MongoDB
-        const updatePromises = results.map(async (studentLog) => {
-            const { studentId, totalPresentMinutes, attendancePercentage } = studentLog;
-
-            return AttendanceRecord.findOneAndUpdate(
-                { lectureId, studentId },
-                { 
-                    status: attendancePercentage > 0 ? ATTENDANCE_STATUS.PRESENT : ATTENDANCE_STATUS.ABSENT,
-                    totalPresentMinutes,
-                    attendancePercentage,
-                    markedAt: new Date()
-                },
-                { upsert: true, new: true }
-            );
+        res.json({
+            success: true,
+            data: { students: Object.values(studentMap), totalLogs: logs.length },
         });
-
-        await Promise.all(updatePromises);
-        
-        // Cleanup temp files
-        fs.unlinkSync(insideFile.path);
-        fs.unlinkSync(outsideFile.path);
-
-        res.json({ success: true, message: 'Videos processed perfectly', data: results });
     } catch (error) {
-        // Cleanup temp files on error
-        if (req.files?.insideVideo?.[0]) fs.unlinkSync(req.files.insideVideo[0].path).catch(()=>{});
-        if (req.files?.outsideVideo?.[0]) fs.unlinkSync(req.files.outsideVideo[0].path).catch(()=>{});
-        
         next(error);
     }
 };
 
-module.exports = { logDoorEvent, getLectureLog, getMyLog, getActiveLectureStudents, processVideos };
+// ─────────────────────────────────────────────────────────────
+//  5. GET /api/door/my/:lectureId  (student's own log)
+// ─────────────────────────────────────────────────────────────
+const getMyLog = async (req, res, next) => {
+    try {
+        const { lectureId } = req.params;
+        const studentId = req.user._id;
+
+        const logs = await EntryExitLog.find({ lectureId, userId: studentId })
+            .sort({ timestamp: 1 }).lean();
+
+        let totalMs = 0;
+        let lastSeen = null;
+        const events = logs.map(log => {
+            if (log.type === 'SEEN' || log.type === 'ENTRY') {
+                if (lastSeen === null) lastSeen = new Date(log.timestamp);
+            } else if ((log.type === 'ABSENT' || log.type === 'EXIT') && lastSeen) {
+                totalMs += new Date(log.timestamp) - lastSeen;
+                lastSeen = null;
+            }
+            return { type: log.type, timestamp: log.timestamp };
+        });
+
+        if (lastSeen) totalMs += Date.now() - lastSeen;
+
+        res.json({
+            success: true,
+            data: { events, totalMinutes: Math.round(totalMs / 60000) },
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
+//  Legacy: POST /api/door/event  (old ENTRY/EXIT from camera_monitor)
+// ─────────────────────────────────────────────────────────────
+const logDoorEvent = async (req, res, next) => {
+    try {
+        const { roomNumber, studentId, type, confidence } = req.body;
+
+        if (!roomNumber || !studentId || !type) {
+            return res.status(400).json({ success: false, message: 'roomNumber, studentId, and type are required' });
+        }
+        if (!['ENTRY', 'EXIT', 'SEEN', 'ABSENT'].includes(type)) {
+            return res.status(400).json({ success: false, message: 'type must be ENTRY, EXIT, SEEN, or ABSENT' });
+        }
+
+        // Route SEEN/ABSENT to new handler
+        if (type === 'SEEN' || type === 'ABSENT') {
+            req.body.status = type;
+            return logPresenceEvent(req, res, next);
+        }
+
+        const lecture = await Lecture.findOne({
+            roomNumber,
+            status: LECTURE_STATUS.ONGOING,
+        }).populate('sectionId', 'courseId');
+
+        if (!lecture) {
+            return res.json({ success: true, message: 'No active lecture, event ignored' });
+        }
+
+        const student = await User.findById(studentId).select('fullName prn email');
+        if (!student) {
+            return res.status(404).json({ success: false, message: 'Student not found' });
+        }
+
+        const log = await EntryExitLog.create({
+            userId: studentId, lectureId: lecture._id,
+            type, timestamp: new Date(), confidence: confidence || null, roomNumber,
+        });
+
+        broadcastToSection(lecture.sectionId._id.toString(), 'door:event', {
+            logId: log._id, lectureId: lecture._id, studentId,
+            studentName: student.fullName, type, timestamp: log.timestamp, roomNumber,
+        });
+
+        res.json({ success: true, message: `${type} logged` });
+    } catch (error) {
+        next(error);
+    }
+};
+
+module.exports = {
+    logPresenceEvent,
+    getPresenceStatus,
+    getActiveLectureStudents,
+    getLectureLog,
+    getMyLog,
+    logDoorEvent,
+    logVideoFrame,
+};

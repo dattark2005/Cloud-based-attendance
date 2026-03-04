@@ -2,6 +2,7 @@ const TeacherAttendance = require('../models/TeacherAttendance');
 const User = require('../models/User');
 const { verifyFace, registerFace: registerFaceWithService } = require('../utils/apiClient');
 const { registerUserFace } = require('./biometricController');
+const { startCamera } = require('../utils/cameraManager');
 const FormData = require('form-data');
 const axios = require('axios');
 
@@ -142,12 +143,12 @@ const markAttendance = async (req, res, next) => {
                 path: 'sectionId',
                 populate: { path: 'courseId', select: 'courseName' }
             });
-            
+
             if (lecture && lecture.status === 'SCHEDULED') {
                 lecture.status = 'ONGOING';
                 lecture.actualStart = new Date();
                 await lecture.save();
-                
+
                 const courseName = lecture.sectionId?.courseId?.courseName || 'Classroom';
 
                 // Notify clients to refresh
@@ -157,6 +158,9 @@ const markAttendance = async (req, res, next) => {
                     startedAt: lecture.actualStart,
                     courseName
                 });
+
+                // Auto-trigger the Python live camera monitor
+                startCamera();
             }
         }
 
@@ -232,7 +236,7 @@ const registerTeacherVoice = async (req, res, next) => {
     try {
         const teacherId = req.user._id;
         const { voiceAudio } = req.body;
-        
+
         if (!voiceAudio) {
             return res.status(400).json({ success: false, message: 'Voice audio string is required' });
         }
@@ -269,7 +273,7 @@ const registerTeacherVoice = async (req, res, next) => {
         res.json({ success: true, message: 'Voice Biometrics registered successfully' });
     } catch (error) {
         if (error.response && error.response.data) {
-             return res.status(error.response.status).json({ success: false, message: error.response.data.detail || error.message });
+            return res.status(error.response.status).json({ success: false, message: error.response.data.detail || error.message });
         }
         next(error);
     }
@@ -322,6 +326,7 @@ const markVoiceAttendance = async (req, res, next) => {
         formData.append('teacher_id', teacherId.toString());
         formData.append('expected_embedding', expectedEmbeddingStr);
 
+
         const pythonRes = await axios.post(`${FACE_SERVICE_URL}/verify-voice`, formData, {
             headers: {
                 ...formData.getHeaders(),
@@ -363,7 +368,7 @@ const markVoiceAttendance = async (req, res, next) => {
 
     } catch (error) {
         if (error.response && error.response.data) {
-             return res.status(error.response.status).json({ success: false, message: error.response.data.detail || error.message });
+            return res.status(error.response.status).json({ success: false, message: error.response.data.detail || error.message });
         }
         next(error);
     }

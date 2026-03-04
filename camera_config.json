@@ -4,9 +4,10 @@
         "4007": "http://192.168.1.8:8080/video",
         "301": "http://192.168.1.12:8080/video"
     },
+    "default_camera": 0,
     "_instructions": {
         "android": "Install 'IP Webcam' app → Start Server → use the shown URL",
         "ios": "Install 'Camo' or 'EpocCam' app → start → use RTSP URL shown",
-        "usage": "Run: python camera_monitor.py --room 4006"
+        "usage": "Run: python live_camera_sync.py"
     }
 }

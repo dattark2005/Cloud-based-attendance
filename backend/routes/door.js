@@ -1,23 +1,27 @@
 const express = require('express');
 const router = express.Router();
 const { authenticate, isTeacher } = require('../middleware/auth');
-const { logDoorEvent, getLectureLog, getMyLog } = require('../controllers/doorController');
+const {
+    logPresenceEvent,
+    logDoorEvent,
+    getPresenceStatus,
+    getLectureLog,
+    getMyLog,
+    getActiveLectureStudents,
+    logVideoFrame,
+} = require('../controllers/doorController');
 
 /**
- * Middleware: validate Door Camera API Key.
- * Camera scripts pass this key in the Authorization header:
- *   Authorization: Bearer <DOOR_CAMERA_API_KEY>
- * Set DOOR_CAMERA_API_KEY in your .env file.
+ * Camera API Key middleware.
+ * Camera scripts pass: Authorization: Bearer <DOOR_CAMERA_API_KEY>
  */
 const validateCameraKey = (req, res, next) => {
-    const authHeader = req.headers['authorization'] || '';
-    const token = authHeader.replace('Bearer ', '').trim();
+    const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim();
     const validKey = process.env.DOOR_CAMERA_API_KEY;
 
     if (!validKey) {
-        // If no key configured, allow in development only
         if (process.env.NODE_ENV === 'development') return next();
-        return res.status(500).json({ success: false, message: 'DOOR_CAMERA_API_KEY not configured on server' });
+        return res.status(500).json({ success: false, message: 'DOOR_CAMERA_API_KEY not configured' });
     }
 
     if (token !== validKey) {
@@ -26,30 +30,31 @@ const validateCameraKey = (req, res, next) => {
     next();
 };
 
-// ── Camera posts door events here (API-key protected, not JWT) ──
+// ── Camera script routes (API-key protected, no JWT) ──────────────────────────
+
+// NEW: Continuous presence events (SEEN / ABSENT)
+router.post('/presence', validateCameraKey, logPresenceEvent);
+
+// NEW: Live video frame streaming from python script
+router.post('/frame', validateCameraKey, logVideoFrame);
+
+// LEGACY: Entry/Exit door events (kept for backward compatibility)
 router.post('/event', validateCameraKey, logDoorEvent);
 
-// ── Camera gets active lecture enrolled students here (API-key protected) ──
-const { getActiveLectureStudents } = require('../controllers/doorController');
+// Camera pre-fetches enrolled student IDs for targeted face search
 router.get('/lecture/active', validateCameraKey, getActiveLectureStudents);
 
-// ── Authenticated user routes ──
+
+// ── Authenticated teacher/student routes ──────────────────────────────────────
 router.use(authenticate);
 
-// Teacher: full log for a lecture with computed time-in-class per student
+// Teacher: real-time presence status for a lecture
+router.get('/presence/:lectureId', isTeacher, getPresenceStatus);
+
+// Teacher: full log (all events) for a lecture
 router.get('/lecture/:lectureId', isTeacher, getLectureLog);
 
-const multer = require('multer');
-const upload = multer({ dest: 'uploads/' }); // Temporary storage for videos
-
-// Teacher: process videos to calculate attendance percentage
-const { processVideos } = require('../controllers/doorController');
-router.post('/process-videos/:lectureId', isTeacher, upload.fields([
-    { name: 'insideVideo', maxCount: 1 },
-    { name: 'outsideVideo', maxCount: 1 }
-]), processVideos);
-
-// Student: own log for a lecture
+// Student: own presence log for a lecture
 router.get('/my/:lectureId', getMyLog);
 
 module.exports = router;

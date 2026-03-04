@@ -7,6 +7,7 @@ const { LECTURE_STATUS, ATTENDANCE_STATUS, CLOUDINARY_FOLDERS } = require('../co
 const { broadcastToSection, broadcastToTeacher } = require('../utils/socket');
 const { uploadToCloudinary } = require('../config/cloudinary');
 const { verifyFace } = require('../utils/apiClient');
+const { stopCamera } = require('../utils/cameraManager');
 
 /**
  * Start a live session (Lecture)
@@ -82,6 +83,9 @@ const endSession = async (req, res, next) => {
             lectureId: lecture._id
         });
 
+        // Auto-stop the Python live camera monitor
+        stopCamera();
+
         res.json({
             success: true,
             message: 'Session ended successfully'
@@ -101,10 +105,18 @@ const getActiveSessions = async (req, res, next) => {
 
         // Auto-complete any globally expired lectures
         const now = new Date();
-        await Lecture.updateMany(
-            { status: { $in: [LECTURE_STATUS.SCHEDULED, LECTURE_STATUS.ONGOING] }, scheduledEnd: { $lt: now } },
-            { $set: { status: LECTURE_STATUS.COMPLETED, actualEnd: now } }
-        );
+        const expiredLectures = await Lecture.find({ status: { $in: [LECTURE_STATUS.SCHEDULED, LECTURE_STATUS.ONGOING] }, scheduledEnd: { $lt: now } });
+
+        if (expiredLectures.length > 0) {
+            await Lecture.updateMany(
+                { status: { $in: [LECTURE_STATUS.SCHEDULED, LECTURE_STATUS.ONGOING] }, scheduledEnd: { $lt: now } },
+                { $set: { status: LECTURE_STATUS.COMPLETED, actualEnd: now } }
+            );
+            // If any ongoing lectures were closed, stop the camera
+            if (expiredLectures.some(l => l.status === LECTURE_STATUS.ONGOING)) {
+                stopCamera();
+            }
+        }
 
         let query = { status: LECTURE_STATUS.ONGOING };
 
