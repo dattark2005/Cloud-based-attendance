@@ -5,7 +5,8 @@
     "main": "server.js",
     "scripts": {
         "start": "node server.js",
-        "dev": "nodemon server.js",
+        "dev": "concurrently --kill-others-on-fail --prefix-colors \"cyan,yellow,magenta\" --names \"NODE,FACE,VOICE\" \"nodemon server.js\" \"cmd /c set PYTHONIOENCODING=utf-8 && python -m uvicorn face_recognition_service:app --host 0.0.0.0 --port 8000 --reload --app-dir ../\" \"cmd /c set PYTHONIOENCODING=utf-8 && python -m uvicorn voice_recognition_service:app --host 0.0.0.0 --port 8081 --reload --app-dir ../\"",
+        "dev:camera": "concurrently --kill-others-on-fail --prefix-colors \"cyan,yellow,magenta,green\" --names \"NODE,FACE,VOICE,CAM\" \"nodemon server.js\" \"cmd /c set PYTHONIOENCODING=utf-8 && python -m uvicorn face_recognition_service:app --host 0.0.0.0 --port 8000 --reload --app-dir ../\" \"cmd /c set PYTHONIOENCODING=utf-8 && python -m uvicorn voice_recognition_service:app --host 0.0.0.0 --port 8081 --reload --app-dir ../\" \"cmd /c set PYTHONIOENCODING=utf-8 && python ../live_camera_sync.py\"",
         "test": "jest --coverage"
     },
     "keywords": [
@@ -33,6 +34,7 @@
         "socket.io": "^4.8.3"
     },
     "devDependencies": {
+        "concurrently": "^9.2.1",
         "jest": "^29.7.0",
         "nodemon": "^3.0.2"
     }

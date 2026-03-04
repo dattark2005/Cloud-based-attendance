@@ -284,6 +284,7 @@ const verifyUserVoice = async (req, res, next) => {
         data: {
           verified: verificationResult.verified,
           confidence: verificationResult.confidence,
+          reason: verificationResult.reason,
         },
       });
     } catch (serviceError) {

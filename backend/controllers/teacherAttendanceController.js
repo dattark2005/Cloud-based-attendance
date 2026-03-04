@@ -7,6 +7,7 @@ const FormData = require('form-data');
 const axios = require('axios');
 
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL || 'http://localhost:8000';
+const VOICE_SERVICE_URL = process.env.VOICE_SERVICE_URL || 'http://localhost:8081';
 
 /**
  * Get today's date string in YYYY-MM-DD
@@ -246,31 +247,30 @@ const registerTeacherVoice = async (req, res, next) => {
         const audioBuffer = Buffer.from(base64Data, 'base64');
 
         const formData = new FormData();
+        formData.append('user_id', teacherId.toString());
         formData.append('file', audioBuffer, {
             filename: 'registration_audio.webm',
             contentType: 'audio/webm'
         });
 
-        const pythonRes = await axios.post(`${FACE_SERVICE_URL}/register-voice`, formData, {
+        const pythonRes = await axios.post(`${VOICE_SERVICE_URL}/register-voice`, formData, {
             headers: {
                 ...formData.getHeaders(),
             },
         });
 
         const data = pythonRes.data;
-        if (!data.success || !data.embedding) {
+        if (!data.success) {
             return res.status(400).json({ success: false, message: data.message || 'Voice registration failed in Python service' });
         }
 
-        const binaryStr = JSON.stringify(data.embedding);
-        const floatArray = JSON.parse(binaryStr);
-        // Save to DB
+        // Python service already saved the embedding + audio to MongoDB.
+        // Just stamp the registeredAt timestamp via Mongoose for populated queries.
         await User.findByIdAndUpdate(teacherId, {
-            voiceEmbedding: Buffer.from(Float32Array.from(floatArray).buffer),
             voiceRegisteredAt: new Date(),
         });
 
-        res.json({ success: true, message: 'Voice Biometrics registered successfully' });
+        res.json({ success: true, message: 'Voice Biometrics registered successfully', audioUrl: data.audioUrl });
     } catch (error) {
         if (error.response && error.response.data) {
             return res.status(error.response.status).json({ success: false, message: error.response.data.detail || error.message });
@@ -319,15 +319,14 @@ const markVoiceAttendance = async (req, res, next) => {
         const audioBuffer = Buffer.from(base64Data, 'base64');
 
         const formData = new FormData();
+        formData.append('user_id', teacherId.toString());
         formData.append('file', audioBuffer, {
             filename: 'verification_audio.webm',
             contentType: 'audio/webm'
         });
-        formData.append('teacher_id', teacherId.toString());
-        formData.append('expected_embedding', expectedEmbeddingStr);
 
 
-        const pythonRes = await axios.post(`${FACE_SERVICE_URL}/verify-voice`, formData, {
+        const pythonRes = await axios.post(`${VOICE_SERVICE_URL}/verify-voice`, formData, {
             headers: {
                 ...formData.getHeaders(),
             },
@@ -335,17 +334,10 @@ const markVoiceAttendance = async (req, res, next) => {
 
         const data = pythonRes.data;
 
-        if (!data.success) {
-            if (data.isSpoofed) {
-                return res.status(403).json({
-                    success: false,
-                    isSpoofed: true,
-                    message: data.message || 'Liveness check failed. Playback spoofing detected.'
-                });
-            }
+        if (!data.verified) {
             return res.status(400).json({
                 success: false,
-                message: data.message || 'Voice verification failed (low confidence)',
+                message: data.reason || 'Voice verification failed (low confidence)',
                 data: { confidence: data.confidence }
             });
         }
@@ -357,7 +349,7 @@ const markVoiceAttendance = async (req, res, next) => {
             status: 'PRESENT',
             lectureId: lectureId || null,
             verificationMethod: 'VOICE',
-            confidenceScore: data.confidence, // High accuracy score > 0.85
+            confidenceScore: data.confidence,
         });
 
         res.json({

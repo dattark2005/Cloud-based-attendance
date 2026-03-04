@@ -3,6 +3,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Mic, Square, Play, RefreshCw, CheckCircle2, AlertCircle, Volume2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'react-hot-toast';
 
 interface VoiceRecorderProps {
   onRecord: (audioBase64: string) => void;
@@ -70,6 +71,10 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
   };
 
   const confirm = () => {
+    if (duration < 2) {
+      toast.error('Recording too short! Please speak clearly for at least 2 seconds.');
+      return;
+    }
     if (audioBase64) {
       onRecord(audioBase64);
     }
@@ -84,7 +89,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
   return (
     <div className="flex flex-col items-center w-full max-w-md mx-auto space-y-6">
       {sentence && (
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           className="w-full p-6 glass-card rounded-3xl border-2 border-primary/20 text-center space-y-3"
@@ -127,7 +132,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
               </motion.div>
             )}
           </AnimatePresence>
-          
+
           {isRecording && (
             <div className="absolute inset-0 rounded-full border-2 border-accent animate-ping opacity-20 pointer-events-none"></div>
           )}
@@ -136,8 +141,8 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
         {isRecording && (
           <div className="flex flex-col items-center space-y-2">
             <div className="flex space-x-1">
-              {[1,2,3,4,5].map(i => (
-                <motion.div 
+              {[1, 2, 3, 4, 5].map(i => (
+                <motion.div
                   key={i}
                   animate={{ height: [10, 30, 10] }}
                   transition={{ duration: 0.5, repeat: Infinity, delay: i * 0.1 }}
@@ -152,13 +157,13 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
         )}
 
         {audioUrl && !isRecording && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             className="w-full space-y-4"
           >
             <div className="flex justify-center space-x-4">
-              <button 
+              <button
                 onClick={reset}
                 className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-white/70 hover:bg-white/10 transition-all text-sm"
               >
@@ -166,7 +171,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
                 <span>Rerecord</span>
               </button>
             </div>
-            <button 
+            <button
               onClick={confirm}
               className="w-full btn-primary flex items-center justify-center space-x-2 py-4"
             >

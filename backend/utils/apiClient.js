@@ -2,7 +2,7 @@ const axios = require('axios');
 const FormData = require('form-data');
 
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL || 'http://localhost:8000';
-const VOICE_SERVICE_URL = process.env.VOICE_SERVICE_URL || 'http://localhost:8001';
+const VOICE_SERVICE_URL = process.env.VOICE_SERVICE_URL || 'http://localhost:8081';
 
 /**
  * Register face with Python face recognition service
@@ -146,8 +146,8 @@ const verifyVoice = async (userId, audioBuffer, expectedText = null) => {
     return response.data;
   } catch (error) {
     if (error.code === 'ECONNREFUSED' || error.message.includes('timeout')) {
-      console.warn('Voice Service Unavailable - Returning Mock Verification');
-      return { verified: true, confidence: 0.98 };
+      console.error('Voice Service Unavailable or Timed out');
+      return { verified: false, confidence: 0, reason: "Voice AI Service timed out or is offline. Please try again." };
     }
     console.error('Voice verification error:', error.message);
     throw new Error('Failed to verify voice');
