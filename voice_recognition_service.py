@@ -1,5 +1,8 @@
 # Voice Recognition Service - Complete Production Code
 # voice_service/app.py
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +21,25 @@ from pydub import AudioSegment
 from sklearn.metrics.pairwise import cosine_similarity
 from typing import List, Optional
 import speech_recognition as sr
+from pathlib import Path
+
+# ── Load .env (backend/.env relative to this file's location) ──
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent / 'backend' / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f'✅ Voice service loaded env from {env_path}')
+    else:
+        root_env = Path(__file__).parent / '.env'
+        if root_env.exists():
+            load_dotenv(root_env)
+            print(f'✅ Voice service loaded env from {root_env}')
+        else:
+            print('⚠️  Voice service: no .env found')
+except ImportError:
+    print('⚠️  python-dotenv not installed')
+
 
 app = FastAPI(title="Voice Recognition Service")
 
@@ -78,7 +100,13 @@ def detect_voice_liveness(audio_bytes):
     Detect if audio is from live person or recording/TTS
     Returns: (is_live: bool, confidence: float, reason: str)
     """
-    wav = preprocess_audio(audio_bytes)
+    if not audio_bytes or len(audio_bytes) < 1000:
+        return False, 0.0, "Audio recording is empty or corrupted"
+
+    try:
+        wav = preprocess_audio(audio_bytes)
+    except Exception as e:
+        return False, 0.0, f"Failed to process audio format: {str(e)}"
     
     # 1. Check duration (too short = suspicious)
     duration = len(wav) / 16000
@@ -89,26 +117,47 @@ def detect_voice_liveness(audio_bytes):
         return False, 0.3, "Audio too long (maximum 10 seconds)"
     
     # 2. Check for background noise (real recordings have some noise)
-    # Completely clean audio might be synthetic
-    noise_level = np.std(wav[:int(0.1 * len(wav))])  # First 100ms
+    # Use standard deviation of the whole clip rather than just first 100ms (as digital silence from noise gates could trigger a false positive).
+    noise_level = np.std(wav)
     
-    if noise_level < 0.001:
-        return False, 0.4, "Audio too clean (possible synthetic)"
+    if noise_level < 0.001:  # Reduced back, as digital playback or extreme noise-cancellation can create silence
+        return False, 0.4, "Audio too clean (possible synthetic or playback detected)"
     
     # 3. Check spectral characteristics
     spectral_centroid = librosa.feature.spectral_centroid(y=wav, sr=16000)
     mean_centroid = np.mean(spectral_centroid)
     
-    # Human voice typically 85-255 Hz for males, 165-255 Hz for females
-    if mean_centroid < 50 or mean_centroid > 8000:
-        return False, 0.5, "Unusual frequency characteristics"
+    if mean_centroid < 80 or mean_centroid > 6000:
+        return False, 0.5, f"Unusual frequency characteristics (Mean centroid: {mean_centroid:.2f})"
+        
+    # 3.5 Check for High-Frequency Compression (The "Phone Speaker" test)
+    # Phone speakers and compressed recordings aggressively cut off high frequencies.
+    # A real human voice in a room has more high-frequency energy (air/breath).
+    # We check the 85th percentile spectral rolloff.
+    rolloff = librosa.feature.spectral_rolloff(y=wav, sr=16000, roll_percent=0.85)
+    mean_rolloff = np.mean(rolloff)
     
-    # 4. Check for pitch variations (humans have natural variations)
+    if mean_rolloff < 2000:  # If 85% of the energy is below 2000Hz, it's heavily muffled/compressed
+        return False, 0.5, f"Audio heavily compressed/muffled (Rolloff: {mean_rolloff:.2f}Hz) - Possible playback"
+    
+    # 4. Check for pitch variations
     pitches, magnitudes = librosa.piptrack(y=wav, sr=16000)
     pitch_variation = np.std(pitches[pitches > 0])
     
-    if pitch_variation < 10:
-        return False, 0.5, "Unnatural pitch stability (possible TTS)"
+    # DEBUG: Log the metrics to a file so we can see the exact difference between live and phone playback
+    import json
+    with open("liveness_metrics.log", "a") as f:
+        metrics = {
+            "duration": float(duration),
+            "noise_level": float(noise_level),
+            "mean_centroid": float(mean_centroid),
+            "mean_rolloff": float(mean_rolloff),
+            "pitch_variation": float(pitch_variation)
+        }
+        f.write(json.dumps(metrics) + "\n")
+    
+    if pitch_variation < 8: # Reduced to 8 as short phrases like 'I am present' might not have much natural variation
+        return False, 0.5, f"Unnatural pitch stability (Variation: {pitch_variation:.2f})"
     
     return True, 0.85, "Live voice detected"
 
@@ -208,8 +257,12 @@ async def verify_voice(
                 audio_data = recognizer.record(source)
                 try:
                     recognized_text = recognizer.recognize_google(audio_data)
-                    # Check if expected text is in recognized text (case insensitive)
-                    text_match = expected_text.lower() in recognized_text.lower()
+                    # Remove EVERYTHING except letters and numbers (spaces and punctuation gone)
+                    clean_expected = "".join(c for c in expected_text if c.isalnum()).lower()
+                    clean_recognized = "".join(c for c in recognized_text if c.isalnum()).lower()
+                    
+                    # Check if expected text is in recognized text 
+                    text_match = clean_expected in clean_recognized
                 except Exception as stt_error:
                     print(f"STT Error: {stt_error}")
                     text_match = False
@@ -253,31 +306,32 @@ async def verify_voice(
             [current_embedding],
             [stored_embedding]
         )[0][0]
-        
         # Convert to confidence (0-1)
         confidence = (similarity + 1) / 2
         
         # Threshold for verification
-        VERIFICATION_THRESHOLD = 0.75
+        # Resemblyzer embeddings of different humans still share baseline similarity (~0.5 - 0.7)
+        # So a threshold of 0.75 (which is similarity 0.5) is far too low.
+        VERIFICATION_THRESHOLD = 0.85
         
         is_match = confidence > VERIFICATION_THRESHOLD
         
+        with open("liveness_metrics.log", "a") as f:
+            f.write(f"Speaker Match Debug - Similarity: {similarity:.3f}, Confidence: {confidence:.3f}, Match: {is_match}\n")
+        
+        if not is_match:
+            return {
+                "verified": False,
+                "confidence": float(confidence),
+                "reason": f"Speaker Voice Match failed (Confidence {confidence:.2f} < {VERIFICATION_THRESHOLD}) - Not the registered user."
+            }
+        
         # Upload verification audio to Cloudinary (temporary)
-        if is_match:
-            upload_result = cloudinary.uploader.upload(
-                audio_bytes,
-                folder="attendance/voice_verifications",
-                public_id=f"verify_{user_id}_{int(time.time())}",
-                resource_type="video",
-                # Auto-delete after 7 days
-                expires_at=int(time.time()) + (7 * 24 * 60 * 60)
-            )
-            verification_audio_url = upload_result['secure_url']
         else:
             verification_audio_url = None
         
         return {
-            "verified": is_match,
+            "verified": bool(is_match),
             "confidence": float(confidence),
             "similarity": float(similarity),
             "livenessConfidence": liveness_confidence,

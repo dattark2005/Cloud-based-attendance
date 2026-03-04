@@ -140,6 +140,7 @@ export default function StudentProfilePage() {
 
     const registerVoice = async () => {
         if (!audioBase64) { toast.error('Record a voice sample first'); return; }
+        if (audioDuration < 2) { toast.error('Recording too short! Please speak the phrase clearly for at least 2 seconds.'); return; }
         setRegisteringVoice(true);
         try {
             const res = await fetchWithAuth('/biometric/voice/register', {
@@ -224,8 +225,8 @@ export default function StudentProfilePage() {
                             key={tab.id}
                             onClick={() => setActiveTab(tab.id)}
                             className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all ${activeTab === tab.id
-                                    ? 'bg-primary text-white shadow-lg shadow-primary/20'
-                                    : 'text-white/40 hover:text-white/70'
+                                ? 'bg-primary text-white shadow-lg shadow-primary/20'
+                                : 'text-white/40 hover:text-white/70'
                                 }`}
                         >
                             {tab.icon} {tab.label}

@@ -258,7 +258,7 @@ export default function ClassroomDetailPage({ params }: { params: Promise<{ sect
                                 onClick={() => setIsScheduleModalOpen(true)}
                                 className="btn-primary"
                             >
-                                Schedule First Lecture
+                                Schedule Lecture
                             </button>
                         </div>
                     )}

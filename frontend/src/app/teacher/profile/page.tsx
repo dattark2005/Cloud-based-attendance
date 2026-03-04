@@ -177,6 +177,7 @@ export default function TeacherProfilePage() {
 
     const handleRegisterVoice = async () => {
         if (!audioBase64) { toast.error('Please record a voice sample first'); return; }
+        if (audioDuration < 2) { toast.error('Recording too short! Please speak the phrase clearly for at least 2 seconds.'); return; }
         setRegisteringVoice(true);
         try {
             const res = await fetchWithAuth('/teacher-attendance/register-voice', {

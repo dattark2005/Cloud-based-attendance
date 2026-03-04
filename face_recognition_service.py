@@ -9,6 +9,10 @@ Works on Python 3.14 + Windows. No tensorflow, no dlib, no deepface.
 Models auto-download from OpenCV Zoo on first run (~37MB total).
 """
 
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np

@@ -133,6 +133,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunks = useRef<Blob[]>([]);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
+    const [voiceVerified, setVoiceVerified] = useState(false);
 
     /* ─── Fetch today's status (per-lecture when lectureId provided) ─── */
     const fetchStatus = useCallback(async (): Promise<boolean> => {
@@ -200,6 +201,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
         setAudioBase64(null);
         setAudioDuration(0);
         setIsRecording(false);
+        setVoiceVerified(false);
     };
 
     const startRecording = async () => {
@@ -273,29 +275,28 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
 
     const submitVoiceFaceAttendance = async () => {
         if (!audioBase64) { toast.error('Please record your voice first.'); return; }
+        if (audioDuration < 2) { toast.error('Recording too short. Please speak clearly for at least 2 seconds.'); return; }
         setView('processing');
         try {
-            const body: Record<string, string> = { voiceAudio: audioBase64 };
-            if (lectureId) body.lectureId = lectureId;
-            const res = await fetchWithAuth('/teacher-attendance/mark-voice', {
+            const body: Record<string, string> = { voiceAudio: audioBase64, expectedText: "I am present." };
+            const res = await fetchWithAuth('/biometric/voice/verify', {
                 method: 'POST',
                 body: JSON.stringify(body),
             });
-            if (res.success) {
-                setView('success');
-                toast.success('🎉 Voice attendance and Anti-Spoofing passed!');
-                onSuccess?.();
-                setTimeout(onClose, 2600);
+            if (res.success && res.data?.verified) {
+                setView('voice_face');
+                setVoiceVerified(true);
+                toast.success('🎉 Voice verified successfully! Click Mark Present to continue.');
+            } else {
+                setCapturedImage(null);
+                resetVoice();
+                setView('voice_face');
+                // The backend can pass up Python's specific reason (e.g. "Audio too clean", "Speech-to-text didn't match")
+                toast.error(res.data?.reason || 'Voice verification failed. Try speaking clearer.', { duration: 5000 });
             }
         } catch (err: any) {
             const msg = err instanceof Error ? err.message : 'An error occurred';
-            if (msg.includes('already marked')) {
-                setView('already_marked');
-                toast('Already marked for this lecture! ✅', { icon: '📋' });
-                onSuccess?.();
-                fetchStatus();
-                setTimeout(onClose, 2200);
-            } else if (err.isSpoofed || msg.includes('Spoofing') || msg.includes('Playback')) {
+            if (err.isSpoofed || msg.includes('Spoofing') || msg.includes('Playback')) {
                 setCapturedImage(null);
                 resetVoice();
                 setView('voice_face');
@@ -310,6 +311,39 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                 resetVoice();
                 setView('voice_face');
                 toast.error(msg || 'Voice verification failed. Try speaking clearer.');
+            }
+        }
+    };
+
+    const markVoiceAttendance = async () => {
+        if (!voiceVerified || !audioBase64) return;
+        setView('processing');
+        try {
+            const body: Record<string, string> = { voiceAudio: audioBase64 };
+            if (lectureId) body.lectureId = lectureId;
+            const res = await fetchWithAuth('/teacher-attendance/mark-voice', {
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
+            if (res.success) {
+                setView('success');
+                toast.success('🎉 Attendance marked successfully!');
+                onSuccess?.();
+                setTimeout(onClose, 2600);
+            }
+        } catch (err: any) {
+            const msg = err instanceof Error ? err.message : 'An error occurred';
+            if (msg.includes('already marked')) {
+                setView('already_marked');
+                toast('Already marked for this lecture! ✅', { icon: '📋' });
+                onSuccess?.();
+                fetchStatus();
+                setTimeout(onClose, 2200);
+            } else {
+                setCapturedImage(null);
+                resetVoice();
+                setView('voice_face');
+                toast.error(msg || 'Failed to mark attendance.');
             }
         }
     };
@@ -659,6 +693,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                             <div className="flex items-center gap-2">
                                                 {[
                                                     { step: 1, label: 'Record Voice Phrase', done: !!audioBase64, icon: Mic },
+                                                    { step: 2, label: 'Verify Voice', done: voiceVerified, icon: ShieldCheck },
                                                 ].map((s, i) => {
                                                     const SIcon = s.icon;
                                                     return (
@@ -679,7 +714,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                                 <div className="bg-purple-500/10 border border-purple-500/20 px-4 py-3 rounded-2xl text-center mb-2">
                                                     <p className="font-mono text-purple-200 font-bold text-sm">
                                                         {/* "I want to mark my attendance through my voice." */}
-                                                        "I am present."
+                                                        "I am present"
                                                     </p>
                                                 </div>
 
@@ -752,17 +787,35 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
                                                         </button>
                                                     </motion.div>
                                                 )}
+
+                                                {voiceVerified && (
+                                                    <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="mt-4 p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-center">
+                                                        <ShieldCheck className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
+                                                        <p className="text-emerald-400 font-bold">Voice Verified!</p>
+                                                        <p className="text-xs text-white/50 mt-1">You can now proceed to mark your attendance.</p>
+                                                    </motion.div>
+                                                )}
                                             </div>
 
                                             <div className="flex gap-3 mt-4">
-                                                <button
-                                                    onClick={submitVoiceFaceAttendance}
-                                                    disabled={!audioBase64}
-                                                    className={`w-full flex items-center justify-center gap-2 text-white py-4 rounded-2xl font-bold transition-all shadow-lg disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 shadow-purple-500/20`}
-                                                >
-                                                    <CheckCircle2 className="w-5 h-5" />
-                                                    <span>Verify Voice & Mark Present</span>
-                                                </button>
+                                                {!voiceVerified ? (
+                                                    <button
+                                                        onClick={submitVoiceFaceAttendance}
+                                                        disabled={!audioBase64}
+                                                        className={`w-full flex items-center justify-center gap-2 text-white py-4 rounded-2xl font-bold transition-all shadow-lg disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 shadow-purple-500/20`}
+                                                    >
+                                                        <ShieldCheck className="w-5 h-5" />
+                                                        <span>Verify Voice</span>
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        onClick={markVoiceAttendance}
+                                                        className={`w-full flex items-center justify-center gap-2 text-white py-4 rounded-2xl font-bold transition-all shadow-lg bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20`}
+                                                    >
+                                                        <CheckCircle2 className="w-5 h-5" />
+                                                        <span>Mark Present</span>
+                                                    </button>
+                                                )}
                                             </div>
                                         </motion.div>
                                     )}
