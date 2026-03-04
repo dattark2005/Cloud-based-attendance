@@ -11,9 +11,10 @@ const entryExitLogSchema = new mongoose.Schema({
         ref: 'Lecture',
         required: true,
     },
+    // Legacy door events (ENTRY/EXIT) + new continuous presence events (SEEN/ABSENT)
     type: {
         type: String,
-        enum: ['ENTRY', 'EXIT'],
+        enum: ['ENTRY', 'EXIT', 'SEEN', 'ABSENT'],
         required: true,
     },
     timestamp: {
@@ -36,5 +37,6 @@ const entryExitLogSchema = new mongoose.Schema({
 
 entryExitLogSchema.index({ userId: 1, timestamp: -1 });
 entryExitLogSchema.index({ lectureId: 1 });
+entryExitLogSchema.index({ lectureId: 1, userId: 1, type: 1 });
 
 module.exports = mongoose.model('EntryExitLog', entryExitLogSchema);

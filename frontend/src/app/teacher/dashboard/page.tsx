@@ -12,6 +12,8 @@ import { toast } from 'react-hot-toast';
 import ClassroomCard from '@/components/ClassroomCard';
 import CreateClassroomModal from '@/components/modals/CreateClassroomModal';
 import { useSession } from '@/providers/SessionProvider';
+import LiveClassroomPreview from '@/components/dashboard/LiveClassroomPreview';
+
 
 export default function TeacherDashboard() {
   const { activeSessions, refreshSessions } = useSession();
@@ -80,6 +82,11 @@ export default function TeacherDashboard() {
             <span className="text-xs font-bold uppercase tracking-widest">Create Classroom</span>
           </button>
         </div>
+
+        {/* ── Live Classroom Preview (Only if there's an active session) ── */}
+        {activeSessions.length > 0 && (
+          <LiveClassroomPreview activeSession={activeSessions[0]} />
+        )}
 
         {/* ── Stats Grid ── */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
