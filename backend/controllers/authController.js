@@ -143,6 +143,10 @@ const logout = async (req, res) => {
   // by removing the token. For additional security, you could
   // implement token blacklisting here.
 
+  // Stop any active camera streams when teacher logs out
+  const { stopCamera } = require('../utils/cameraManager');
+  stopCamera();
+
   res.json({
     success: true,
     message: 'Logged out successfully',

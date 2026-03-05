@@ -57,7 +57,11 @@ const limiter = rateLimit({
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // limit each IP to 100 requests per windowMs
   message: 'Too many requests from this IP, please try again later.',
 });
-app.use('/api/', limiter);
+
+// Disable rate limiter on local development to prevent 429 errors from rapid dashboard polling
+if (process.env.NODE_ENV !== 'development') {
+  app.use('/api/', limiter);
+}
 
 // ==================== ROUTES ====================
 
