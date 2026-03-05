@@ -4,6 +4,7 @@ const {
     createClassroom,
     joinClassroom,
     getTeacherClassrooms,
+    getTeacherHistory,
     getStudentClassrooms,
     getClassroomDetail,
     getSectionLectures,
@@ -32,6 +33,7 @@ router.post('/session/:lectureId/verify', authorize(ROLES.STUDENT), verifySessio
 // Teacher specific routes
 router.post('/create', authorize(ROLES.TEACHER, ROLES.ADMIN), createClassroom);
 router.get('/teacher', authorize(ROLES.TEACHER, ROLES.ADMIN), getTeacherClassrooms);
+router.get('/teacher/history', authorize(ROLES.TEACHER, ROLES.ADMIN), getTeacherHistory);
 
 // Student specific routes
 router.post('/join', authorize(ROLES.STUDENT), joinClassroom);

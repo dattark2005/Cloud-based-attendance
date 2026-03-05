@@ -83,6 +83,56 @@ const getTeacherClassrooms = async (req, res, next) => {
 };
 
 /**
+ * Get all past completed lectures for logged in teacher across all sections
+ * GET /api/sections/teacher/history
+ */
+const getTeacherHistory = async (req, res, next) => {
+    try {
+        const teacherId = req.user._id;
+
+        // Find all completed and ongoing lectures taught by this teacher
+        const lectures = await Lecture.find({
+            teacherId,
+            status: { $in: [LECTURE_STATUS.COMPLETED, LECTURE_STATUS.ONGOING] }
+        })
+            .populate('sectionId', 'sectionName courseId')
+            .populate({
+                path: 'sectionId',
+                populate: { path: 'courseId', select: 'courseCode courseName' }
+            })
+            .sort({ scheduledStart: -1 })
+            .lean();
+
+        // Add attendance stats
+        const lecturesWithStats = await Promise.all(
+            lectures.map(async (lecture) => {
+                const totalStudents = lecture.sectionId?.students?.length || 0;
+                const sectionDoc = await Section.findById(lecture.sectionId?._id).select('students');
+                const enrolledCount = sectionDoc?.students?.length || 0;
+
+                const presentCount = await AttendanceRecord.countDocuments({
+                    lectureId: lecture._id,
+                    status: 'PRESENT'
+                });
+
+                return {
+                    ...lecture,
+                    stats: {
+                        enrolled: enrolledCount,
+                        present: presentCount,
+                        absent: enrolledCount - presentCount
+                    }
+                };
+            })
+        );
+
+        res.json({ success: true, count: lecturesWithStats.length, data: { lectures: lecturesWithStats } });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
  * Get a single classroom detail (teacher or enrolled student)
  * GET /api/sections/:sectionId
  */
@@ -207,10 +257,10 @@ const cancelLecture = async (req, res, next) => {
         if (lecture.teacherId.toString() !== req.user._id.toString()) {
             return res.status(403).json({ success: false, message: 'Only the teacher can cancel this lecture' });
         }
-        
+
         // Permanently delete the lecture
         await Lecture.findByIdAndDelete(lectureId);
-        
+
         // Optionally pass a background socket event here if we choose to
         res.json({ success: true, message: 'Lecture deleted successfully' });
     } catch (error) {
@@ -222,6 +272,7 @@ module.exports = {
     createClassroom,
     joinClassroom,
     getTeacherClassrooms,
+    getTeacherHistory,
     getStudentClassrooms,
     getClassroomDetail,
     getSectionLectures,

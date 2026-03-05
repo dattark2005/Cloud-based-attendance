@@ -25,7 +25,8 @@ import sys
 import time
 import logging
 import threading
-import base64
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from pathlib import Path
 from collections import defaultdict
 
@@ -75,6 +76,53 @@ last_posted: dict[str, tuple] = {}
 # All enrolled student IDs for this room's active lecture (fetched at startup)
 expected_student_ids: list[str] = []
 
+# Global MJPEG Frame Buffer
+latest_jpeg = b''
+jpeg_lock = threading.Lock()
+
+# Bounding box tracking for UI
+latest_boxes = []
+box_lock = threading.Lock()
+last_scan_scale = 1.0
+
+# ════════════════════════════════════════════════════════════
+#  MJPEG Video Server (Zero-Lag Stream to Dashboard)
+# ════════════════════════════════════════════════════════════
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    pass
+
+class MJPEGHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass # Suppress HTTP access logs to keep terminal clean
+
+    def do_GET(self):
+        if self.path == '/video_feed':
+            self.send_response(200)
+            self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            while True:
+                with jpeg_lock:
+                    frame_data = latest_jpeg
+                
+                if frame_data:
+                    try:
+                        self.wfile.write(b"--frame\r\n")
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.send_header('Content-Length', str(len(frame_data)))
+                        self.end_headers()
+                        self.wfile.write(frame_data)
+                        self.wfile.write(b'\r\n')
+                    except Exception:
+                        break # Client disconnected (Dashboard closed)
+                time.sleep(0.033) # 30 FPS target
+
+def start_mjpeg_server(port=5000):
+    server = ThreadedHTTPServer(('0.0.0.0', port), MJPEGHandler)
+    log.info(f"🎥 MJPEG Stream Live: http://localhost:{port}/video_feed")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
 # ════════════════════════════════════════════════════════════
 #  Face service call
@@ -147,38 +195,6 @@ def post_presence(student_id: str, status: str, confidence: float = 0.0):
 
     threading.Thread(target=_post, daemon=True).start()
 
-def post_video_frame(frame_bgr: np.ndarray):
-    """
-    Downscales a frame, converts it to base64 JPEG, and POSTs to the backend
-    to be displayed as the Live Preview on the Teacher Dashboard.
-    Runs in a daemon thread to prevent lagging the camera.
-    """
-    def _post():
-        try:
-            # Resize very small for fast WebSocket transmission (320x240)
-            h, w = frame_bgr.shape[:2]
-            scale = 320 / w if w > 320 else 1.0
-            small_frame = cv2.resize(frame_bgr, (0, 0), fx=scale, fy=scale)
-
-            # Compress as JPEG (quality 60)
-            ok, buf = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
-            if not ok: return
-            
-            # Convert to base64
-            b64_str = base64.b64encode(buf).decode('utf-8')
-
-            # Fire and forget POST
-            requests.post(
-                f'{BACKEND_URL}/api/door/frame',
-                json={'frame': b64_str},
-                headers={'Authorization': f'Bearer {API_KEY}'},
-                timeout=2,
-            )
-        except Exception:
-            pass # Ignore streaming errors (too noisy)
-
-    threading.Thread(target=_post, daemon=True).start()
-
 # ════════════════════════════════════════════════════════════
 #  Core scan logic
 # ════════════════════════════════════════════════════════════
@@ -193,9 +209,25 @@ def process_scan(frame_bgr: np.ndarray):
 
     # Build set of IDs detected in this frame (confidence > 0.50)
     seen_this_scan: set[str] = set()
+    new_boxes = []
+    
     for m in matches:
-        if m.get('confidence', 0) >= 0.50:
+        conf = m.get('confidence', 0)
+        if conf >= 0.50:
             seen_this_scan.add(m['userId'])
+            box = m.get('box')
+            if box:
+                # scale box back to ORIGINAL frame size (before the ML scan downscale)
+                orig_box = [box[0]/last_scan_scale, box[1]/last_scan_scale, box[2]/last_scan_scale, box[3]/last_scan_scale]
+                new_boxes.append({
+                    'box': orig_box,
+                    'name': m.get('userName', m['userId'])[:15],
+                    'conf': conf
+                })
+
+    with box_lock:
+        global latest_boxes
+        latest_boxes = new_boxes
 
     log.info(f'📸 Scan | detected={(len(seen_this_scan))} of {len(expected_student_ids)} enrolled')
 
@@ -265,10 +297,13 @@ def fetch_enrolled_students() -> list[str]:
 # ════════════════════════════════════════════════════════════
 
 def monitor(camera_source, refresh_enrolled_mins: int = 5):
-    global expected_student_ids
+    global expected_student_ids, latest_jpeg, last_scan_scale
 
     log.info(f'📷 Presence Monitor starting | Camera: {camera_source}')
     log.info(f'⏱  Scan interval: {SCAN_INTERVAL_SEC}s | Absent threshold: {ABSENT_THRESHOLD//60}min')
+
+    # Start MJPEG video server on port 5000
+    start_mjpeg_server(5000)
 
     # ── Verify face service ──
     try:
@@ -318,24 +353,60 @@ def monitor(camera_source, refresh_enrolled_mins: int = 5):
                     expected_student_ids = new_ids
                 last_enroll_refresh = now
 
-            # ── Stream Video Frame (2 FPS) ──
-            if now - last_stream > STREAM_INTERVAL_SEC:
-                post_video_frame(frame)
-                last_stream = now
+            # ── Update the MJPEG stream buffer ──
+            # Resize slightly if too large for smooth network streaming
+            h, w = frame.shape[:2]
+            stream_scale = 1.0
+            if w > 1280:
+                stream_scale = 1280 / w
+                frame_stream = cv2.resize(frame, (0, 0), fx=stream_scale, fy=stream_scale)
+            else:
+                frame_stream = frame.copy() # copy because we will draw on it
 
-            # ── Run face scan every SCAN_INTERVAL_SEC ──
+            # Add timestamp to frame
+            cv2.putText(frame_stream, time.strftime("%Y-%m-%d %H:%M:%S"), (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Draw bounding boxes from the background AI thread
+            with box_lock:
+                current_boxes = list(latest_boxes)
+                
+            for b in current_boxes:
+                bx = b['box']
+                # scale original original-sized box to the current stream window size
+                sx, sy = int(bx[0] * stream_scale), int(bx[1] * stream_scale)
+                sw, sh = int(bx[2] * stream_scale), int(bx[3] * stream_scale)
+                
+                # Draw green box
+                cv2.rectangle(frame_stream, (sx, sy), (sx + sw, sy + sh), (0, 255, 0), 2)
+                # Draw name label with background panel for visibility
+                label = f"{b['name']} {int(b['conf']*100)}%"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.rectangle(frame_stream, (sx, max(0, sy - th - 10)), (sx + tw + 10, max(0, sy)), (0, 255, 0), cv2.FILLED)
+                cv2.putText(frame_stream, label, (sx + 5, max(15, sy - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+            ok, buf = cv2.imencode('.jpg', frame_stream, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ok:
+                with jpeg_lock:
+                    latest_jpeg = buf.tobytes()
+
+            # ── Run face scan ONLY every SCAN_INTERVAL_SEC ──
             if now - last_scan < SCAN_INTERVAL_SEC:
-                time.sleep(0.05)
+                # We do NOT sleep here anymore. We must process the while loop
+                # as fast as cap.read() gives us frames to keep the video smooth!
                 continue
             last_scan = now
 
-            # Resize for speed
+            # Resize for speed for the ML scan
             h, w = frame.shape[:2]
             if w > FRAME_WIDTH:
-                scale = FRAME_WIDTH / w
-                frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+                last_scan_scale = FRAME_WIDTH / w
+                scan_frame = cv2.resize(frame, (0, 0), fx=last_scan_scale, fy=last_scan_scale)
+            else:
+                last_scan_scale = 1.0
+                scan_frame = frame.copy()
 
-            process_scan(frame)
+            # Run the heavy network ML scan in a background thread so the video stream never drops a frame
+            threading.Thread(target=process_scan, args=(scan_frame,), daemon=True).start()
 
     except KeyboardInterrupt:
         log.info('🛑 Presence monitoring stopped.')

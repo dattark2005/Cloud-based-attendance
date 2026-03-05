@@ -3,12 +3,13 @@ const Lecture = require('../models/Lecture');
 const User = require('../models/User');
 const AttendanceRecord = require('../models/AttendanceRecord');
 const { broadcastToSection } = require('../utils/socket');
+const { startCamera } = require('../utils/cameraManager');
 const { LECTURE_STATUS, VERIFICATION_METHODS, ATTENDANCE_STATUS } = require('../config/constants');
 
 // ─────────────────────────────────────────────────────────────
 //  Helper: recalculate total SEEN time from presence log history
 // ─────────────────────────────────────────────────────────────
-async function calcPresentMinutes(lectureId, studentId) {
+async function calcPresentSeconds(lectureId, studentId) {
     const logs = await EntryExitLog.find({
         lectureId,
         userId: studentId,
@@ -38,7 +39,7 @@ async function calcPresentMinutes(lectureId, studentId) {
         totalMs += Date.now() - lastSeen.getTime();
     }
 
-    return Math.max(0, Math.round(totalMs / 60000));
+    return Math.max(0, Math.round(totalMs / 1000));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -116,21 +117,18 @@ const logPresenceEvent = async (req, res, next) => {
             type: status,          // 'SEEN' or 'ABSENT'
             timestamp: new Date(),
             confidence: confidence || null,
-            roomNumber,
+            roomNumber: lecture.roomNumber,
         });
 
-        // Recalculate present time
-        const totalPresentMinutes = await calcPresentMinutes(lecture._id, studentId);
+        // Recalculate present time in precise seconds
+        const totalPresentSeconds = await calcPresentSeconds(lecture._id, studentId);
 
-        // Calculate lecture duration
-        let durationMins = 60;
-        if (lecture.scheduledStart && lecture.scheduledEnd) {
-            durationMins = Math.max(1, Math.round(
-                (new Date(lecture.scheduledEnd) - new Date(lecture.scheduledStart)) / 60000
-            ));
-        }
+        // Calculate exact elapsed lecture duration in seconds
+        const lectureStartTime = lecture.actualStart ? new Date(lecture.actualStart).getTime() : new Date(lecture.scheduledStart).getTime();
+        const elapsedSeconds = Math.max(1, Math.round((Date.now() - lectureStartTime) / 1000));
 
-        const attendancePercentage = Math.min(100, Math.round((totalPresentMinutes / durationMins) * 100));
+        // Exact percentage based on elapsed time so far, rather than total scheduled time
+        const attendancePercentage = Math.min(100, Math.round((totalPresentSeconds / elapsedSeconds) * 100));
 
         // Upsert AttendanceRecord
         const updatedRecord = await AttendanceRecord.findOneAndUpdate(
@@ -138,7 +136,7 @@ const logPresenceEvent = async (req, res, next) => {
             {
                 $set: {
                     status: attendancePercentage > 0 ? ATTENDANCE_STATUS.PRESENT : ATTENDANCE_STATUS.ABSENT,
-                    totalPresentMinutes,
+                    totalPresentMinutes: Math.round(totalPresentSeconds / 60),
                     attendancePercentage,
                     verificationMethod: VERIFICATION_METHODS.FACE,
                     markedAt: new Date(),
@@ -159,7 +157,7 @@ const logPresenceEvent = async (req, res, next) => {
             status,                          // 'SEEN' | 'ABSENT'
             confidence: confidence || 0,
             timestamp: log.timestamp,
-            totalPresentMinutes,
+            totalPresentMinutes: Math.round(totalPresentSeconds / 60),
             attendancePercentage,
             currentlyPresent: status === 'SEEN',
             roomNumber: lecture.roomNumber, // include room from lecture for socket event
@@ -193,6 +191,11 @@ const getPresenceStatus = async (req, res, next) => {
         }
 
         const allStudents = lecture.sectionId?.students || [];
+
+        // Auto-start camera if the lecture is ONGOING and teacher is viewing the dashboard
+        if (lecture.status === LECTURE_STATUS.ONGOING) {
+            startCamera();
+        }
 
         // Get the most recent presence log entry per student
         const recentLogs = await EntryExitLog.aggregate([

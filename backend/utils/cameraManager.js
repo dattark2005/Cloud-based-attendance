@@ -9,22 +9,39 @@ let cameraProcess = null;
 const startCamera = () => {
     if (cameraProcess) {
         console.log('📷 Camera process is already running.');
+        try {
+            require('./socket').getIo().emit('camera:log', { type: 'info', text: 'Backend: Camera process is already active.' });
+        } catch (e) { }
         return;
     }
 
     console.log('🚀 Starting Camera Monitor (live_camera_sync.py)...');
+    try {
+        require('./socket').getIo().emit('camera:log', { type: 'info', text: 'Backend: Spawning live_camera_sync.py process...' });
+    } catch (e) { }
 
-    // The python script is located in the root of the project, one level up from backend
-    const scriptPath = path.join(__dirname, '../../live_camera_sync.py');
+    const rootPath = path.join(__dirname, '../../');
+    const scriptPath = path.join(rootPath, 'live_camera_sync.py');
 
-    // Use 'py' on Windows, 'python3' on Mac/Linux
-    const pythonCmd = process.platform === 'win32' ? 'py' : 'python3';
+    // On Windows, explicitly try to use the virtual environment's python executable
+    let pythonCmd = process.platform === 'win32'
+        ? path.join(rootPath, '.venv', 'Scripts', 'python.exe')
+        : 'python3';
 
-    // Spawn the python process (unbuffered output so we see logs immediately)
+    try {
+        require('./socket').getIo().emit('camera:log', { type: 'info', text: `Backend: Found Python executable at ${pythonCmd}` });
+    } catch (e) { }
+
+    const fs = require('fs');
+    if (process.platform === 'win32' && !fs.existsSync(pythonCmd)) {
+        pythonCmd = 'python'; // Fallback if no .venv exists
+    }
+
+    // Spawn without shell. Node will safely quote spaces in args under the hood.
     cameraProcess = spawn(pythonCmd, ['-u', scriptPath], {
-        cwd: path.join(__dirname, '../../'),
+        cwd: rootPath,
         env: { ...process.env, PYTHONUNBUFFERED: '1' },
-        shell: process.platform === 'win32' // often helps find 'py' on Windows
+        shell: false
     });
 
     cameraProcess.stdout.on('data', (data) => {
@@ -65,8 +82,20 @@ const startCamera = () => {
 const stopCamera = () => {
     if (cameraProcess) {
         console.log('🛑 Stopping Camera Monitor...');
-        cameraProcess.kill('SIGINT'); // Graceful python exit
+        const pid = cameraProcess.pid;
+        if (process.platform === 'win32') {
+            const { exec } = require('child_process');
+            // Node's spawn PID on Windows is unreliable, so we kill any python process running our script
+            exec(`wmic process where "name='python.exe' and commandline like '%live_camera_sync.py%'" call terminate`, (err) => {
+                if (err) console.error(`Failed to kill process tree via wmic: ${err}`);
+            });
+        } else {
+            cameraProcess.kill('SIGINT'); // Graceful python exit for Linux/Mac
+        }
         cameraProcess = null;
+        try {
+            require('./socket').getIo().emit('camera:log', { type: 'info', text: 'Backend: Camera stopped via teacher action.' });
+        } catch (e) { }
     } else {
         console.log('📷 No active camera process to stop.');
     }

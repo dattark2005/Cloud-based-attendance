@@ -10,6 +10,51 @@ const { verifyFace } = require('../utils/apiClient');
 const { stopCamera } = require('../utils/cameraManager');
 
 /**
+ * Helper to mark unseen students absent at the end of a lecture
+ */
+async function markUnseenStudentsAbsent(lectureId, sectionId, roomNumber) {
+    try {
+        const section = await Section.findById(sectionId);
+        if (!section || !section.students || section.students.length === 0) return;
+
+        const existingRecords = await AttendanceRecord.find({ lectureId });
+        const witnessedIds = new Set(existingRecords.map(r => r.studentId.toString()));
+
+        const unrecordedIds = section.students.filter(sId => !witnessedIds.has(sId.toString()));
+
+        if (unrecordedIds.length > 0) {
+            const now = new Date();
+            const newRecords = unrecordedIds.map(sId => ({
+                lectureId,
+                studentId: sId,
+                status: ATTENDANCE_STATUS.ABSENT,
+                totalPresentMinutes: 0,
+                attendancePercentage: 0,
+                verificationMethod: 'FACE',
+                markedAt: now,
+                currentlyPresent: false
+            }));
+            await AttendanceRecord.insertMany(newRecords);
+
+            const newLogs = unrecordedIds.map(sId => ({
+                userId: sId,
+                lectureId,
+                type: 'ABSENT',
+                timestamp: now,
+                roomNumber: roomNumber || section.roomNumber,
+                confidence: 1.0,
+            }));
+            await EntryExitLog.insertMany(newLogs);
+
+            console.log(`[SESSION] Marked ${unrecordedIds.length} unseen students ABSENT for lecture ${lectureId}`);
+        }
+    } catch (err) {
+        console.error(`[SESSION] Error marking unseen students absent:`, err);
+    }
+}
+
+
+/**
  * Start a live session (Lecture)
  * POST /api/sections/:sectionId/start-session
  */
@@ -78,6 +123,9 @@ const endSession = async (req, res, next) => {
         lecture.actualEnd = new Date();
         await lecture.save();
 
+        // Mark unseen students as absent
+        await markUnseenStudentsAbsent(lecture._id, sectionId, lecture.roomNumber);
+
         // Notify students
         broadcastToSection(sectionId, 'session:ended', {
             lectureId: lecture._id
@@ -112,6 +160,11 @@ const getActiveSessions = async (req, res, next) => {
                 { status: { $in: [LECTURE_STATUS.SCHEDULED, LECTURE_STATUS.ONGOING] }, scheduledEnd: { $lt: now } },
                 { $set: { status: LECTURE_STATUS.COMPLETED, actualEnd: now } }
             );
+
+            // Mark unseen students as absent for auto-completed lectures
+            for (const l of expiredLectures) {
+                await markUnseenStudentsAbsent(l._id, l.sectionId, l.roomNumber);
+            }
             // If any ongoing lectures were closed, stop the camera
             if (expiredLectures.some(l => l.status === LECTURE_STATUS.ONGOING)) {
                 stopCamera();
