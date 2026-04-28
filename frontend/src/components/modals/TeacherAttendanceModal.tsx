@@ -131,6 +131,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     const [audioDuration, setAudioDuration] = useState(0);
     const [audioUrl, setAudioUrl] = useState<string | null>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
     const audioChunks = useRef<Blob[]>([]);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
     const [voiceVerified, setVoiceVerified] = useState(false);
@@ -207,6 +208,7 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     const startRecording = async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            streamRef.current = stream;
             const mr = new MediaRecorder(stream);
             audioChunks.current = [];
             mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data); };
@@ -230,11 +232,13 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
 
     const stopRecording = () => {
         mediaRecorderRef.current?.stop();
+        streamRef.current?.getTracks().forEach(t => t.stop());
         setIsRecording(false);
         if (timerRef.current) clearInterval(timerRef.current);
     };
 
     useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
+    useEffect(() => () => { streamRef.current?.getTracks().forEach(t => t.stop()); }, []);
 
     /* â”€â”€â”€ Submit helpers â”€â”€â”€ */
     const submitFaceAttendance = async () => {
@@ -396,36 +400,38 @@ const TeacherAttendanceModal: React.FC<TeacherAttendanceModalProps> = ({
     }) => (
         <div className="space-y-5">
             <div className="relative w-full aspect-video rounded-3xl overflow-hidden bg-black/60 border border-white/10">
-                {/* Webcam always mounted — hidden when photo captured */}
-                <div style={{ display: capturedImage ? 'none' : 'block' }} className="w-full h-full">
-                    {cameraError ? (
-                        <div className="flex flex-col items-center justify-center h-full space-y-3">
-                            <AlertTriangle className="w-10 h-10 text-amber-400" />
-                            <p className="text-sm text-white/50">Camera access denied</p>
-                        </div>
-                    ) : (
-                        <>
-                            <Webcam
-                                ref={webcamRef}
-                                audio={false}
-                                screenshotFormat="image/jpeg"
-                                screenshotQuality={0.92}
-                                forceScreenshotSourceSize
-                                videoConstraints={{ facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }}
-                                onUserMediaError={() => setCameraError(true)}
-                                className="w-full h-full object-cover"
-                                mirrored
-                            />
-                            {/* Face oval guide — static, no pulse */}
-                            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                                <div className="w-44 h-56 border-2 border-dashed border-blue-400/40 rounded-[100%]" />
+                {/* Webcam conditionally mounted — unmounted when photo captured to free camera */}
+                {!capturedImage && (
+                    <div className="w-full h-full">
+                        {cameraError ? (
+                            <div className="flex flex-col items-center justify-center h-full space-y-3">
+                                <AlertTriangle className="w-10 h-10 text-amber-400" />
+                                <p className="text-sm text-white/50">Camera access denied</p>
                             </div>
-                            <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/60 to-transparent text-center">
-                                <p className="text-xs text-white/60 font-medium">Center your face in the oval</p>
-                            </div>
-                        </>
-                    )}
-                </div>
+                        ) : (
+                            <>
+                                <Webcam
+                                    ref={webcamRef}
+                                    audio={false}
+                                    screenshotFormat="image/jpeg"
+                                    screenshotQuality={0.92}
+                                    forceScreenshotSourceSize
+                                    videoConstraints={{ facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }}
+                                    onUserMediaError={() => setCameraError(true)}
+                                    className="w-full h-full object-cover"
+                                    mirrored
+                                />
+                                {/* Face oval guide — static, no pulse */}
+                                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                                    <div className="w-44 h-56 border-2 border-dashed border-blue-400/40 rounded-[100%]" />
+                                </div>
+                                <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/60 to-transparent text-center">
+                                    <p className="text-xs text-white/60 font-medium">Center your face in the oval</p>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                )}
 
                 {/* Captured image preview */}
                 {capturedImage && (

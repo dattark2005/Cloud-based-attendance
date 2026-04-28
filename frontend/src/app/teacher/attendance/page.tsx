@@ -84,7 +84,17 @@ export default function TeacherAttendance() {
   const [isRecording, setIsRecording] = useState(false);
   const [voiceSentence, setVoiceSentence] = useState<string>('');
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach(t => t.stop());
+      if (mediaRecorderRef.current?.state === 'recording') {
+        mediaRecorderRef.current.stop();
+      }
+    };
+  }, []);
 
   // ── 1. Load teacher's sections ───────────────────────────────────────────
   useEffect(() => {
@@ -179,6 +189,7 @@ export default function TeacherAttendance() {
   const startVoiceRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
       const recorder = new MediaRecorder(stream);
       audioChunksRef.current = [];
       recorder.ondataavailable = (e) => audioChunksRef.current.push(e.data);
@@ -201,6 +212,7 @@ export default function TeacherAttendance() {
     if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop();
     }
+    streamRef.current?.getTracks().forEach(t => t.stop());
     setIsRecording(false);
   };
 
@@ -275,8 +287,8 @@ export default function TeacherAttendance() {
                     key={sec._id}
                     onClick={() => setSelectedSection(sec)}
                     className={`w-full text-left p-4 rounded-2xl border transition-all ${selectedSection?._id === sec._id
-                        ? 'border-primary bg-primary/10 ring-2 ring-primary/20'
-                        : 'border-white/5 bg-white/3 hover:border-white/10'
+                      ? 'border-primary bg-primary/10 ring-2 ring-primary/20'
+                      : 'border-white/5 bg-white/3 hover:border-white/10'
                       }`}
                   >
                     <div className="flex items-center justify-between">
@@ -311,8 +323,8 @@ export default function TeacherAttendance() {
                         key={lec._id}
                         onClick={() => setSelectedLecture(lec)}
                         className={`w-full text-left p-3 rounded-xl border transition-all ${selectedLecture?._id === lec._id
-                            ? 'border-primary bg-primary/10'
-                            : 'border-white/5 bg-white/3 hover:border-white/10'
+                          ? 'border-primary bg-primary/10'
+                          : 'border-white/5 bg-white/3 hover:border-white/10'
                           }`}
                       >
                         <div className="flex items-start justify-between gap-2">
@@ -404,8 +416,8 @@ export default function TeacherAttendance() {
                         onClick={triggerAttendance}
                         disabled={isRequesting || isRequestActive}
                         className={`self-start sm:self-center flex items-center gap-2 px-7 py-4 rounded-[24px] font-black text-xs uppercase tracking-widest transition-all ${isRequestActive
-                            ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 cursor-not-allowed'
-                            : 'bg-primary hover:bg-primary/80 text-white'
+                          ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 cursor-not-allowed'
+                          : 'bg-primary hover:bg-primary/80 text-white'
                           }`}
                       >
                         {isRequesting ? (
@@ -499,8 +511,8 @@ export default function TeacherAttendance() {
                         <button
                           onClick={isRecording ? stopVoiceRecording : startVoiceRecording}
                           className={`flex-1 py-4 rounded-2xl text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${isRecording
-                              ? 'bg-rose-500 hover:bg-rose-600 text-white animate-pulse'
-                              : 'bg-violet-500 hover:bg-violet-600 text-white'
+                            ? 'bg-rose-500 hover:bg-rose-600 text-white animate-pulse'
+                            : 'bg-violet-500 hover:bg-violet-600 text-white'
                             }`}
                         >
                           {isRecording

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Activity, Wifi, WifiOff, Users, Loader2 } from 'lucide-react';
 import { fetchWithAuth } from '@/lib/api';
@@ -36,18 +36,187 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
     const [presenceStats, setPresenceStats] = useState<{ total: number; present: number; absent: number; unseen: number } | null>(null);
     const [loading, setLoading] = useState(true);
     const [cameraActive, setCameraActive] = useState(false);
+    const [camError, setCamError] = useState<string | null>(null);
     const cameraActiveTimer = useRef<NodeJS.Timeout | null>(null);
+
+    // Camera / canvas refs
+    const videoRef   = useRef<HTMLVideoElement>(null);
+    const canvasRef  = useRef<HTMLCanvasElement>(null);
+    const wsRef      = useRef<WebSocket | null>(null);
+    const snapRef    = useRef<HTMLCanvasElement | null>(null); // offscreen snap canvas
+    const sendingRef = useRef(false);
+    const prevNamesRef   = useRef<Set<string>>(new Set());
+    // Tracks per-name leave timers — LEAVE is only logged after 60s of absence
+    const leaveTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
     // Activity Logs
     const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
 
-
-    // Add a new activity log
-    const addActivityLog = (message: string, type: 'ENTER' | 'LEAVE') => {
+    const addActivityLog = useCallback((message: string, type: 'ENTER' | 'LEAVE') => {
         const id = Math.random().toString(36).substring(7);
-        // Keep the last 50 events in the history log
         setActivityLogs(prev => [{ id, message, type, timestamp: new Date() }, ...prev].slice(0, 50));
-    };
+    }, []);
+
+    // ── Start webcam via getUserMedia ──
+    const startCamera = useCallback(async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+                audio: false,
+            });
+            const video = videoRef.current;
+            if (video) {
+                video.srcObject = stream;
+                await video.play();
+                setCameraActive(true);
+                setCamError(null);
+            }
+            snapRef.current = document.createElement('canvas');
+        } catch {
+            setCamError('Camera access denied — please allow camera permission and refresh.');
+        }
+    }, []);
+
+    // Fixed resolution Python always receives — coords are always in this space
+    const SNAP_W = 640;
+    const SNAP_H = 360;
+
+    // ── Draw boxes returned by Python onto the canvas overlay ──
+    const drawBoxes = useCallback((boxes: { x: number; y: number; w: number; h: number; name: string; conf: number }[]) => {
+        const canvas = canvasRef.current;
+        const video  = videoRef.current;
+        if (!canvas || !video) return;
+
+        // Fit canvas to displayed video element
+        const rect = video.getBoundingClientRect();
+        if (rect.width === 0) return;
+        canvas.width  = rect.width;
+        canvas.height = rect.height;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Python coords are in SNAP_W x SNAP_H space — scale to canvas
+        const scaleX = canvas.width  / SNAP_W;
+        const scaleY = canvas.height / SNAP_H;
+
+        boxes.forEach(b => {
+            const isKnown = !!b.name && b.name !== 'Detecting...';
+
+            // Scale from snapshot space to canvas space
+            const bx = b.x * scaleX;
+            const by = b.y * scaleY;
+            const bw = b.w * scaleX;
+            const bh = b.h * scaleY;
+
+            // Webcam display is mirrored — flip X so box follows the visual face
+            const rx = canvas.width - bx - bw;
+
+            ctx.strokeStyle = isKnown ? '#22d3ee' : '#f97316';
+            ctx.lineWidth   = 2;
+            ctx.strokeRect(rx, by, bw, bh);
+
+            const label = isKnown ? `${b.name}  ${Math.round(b.conf * 100)}%` : 'Detecting...';
+            ctx.font = 'bold 13px Inter, sans-serif';
+            const tw = ctx.measureText(label).width;
+            ctx.fillStyle = isKnown ? 'rgba(34,211,238,0.9)' : 'rgba(249,115,22,0.85)';
+            ctx.fillRect(rx, by - 22, tw + 10, 22);
+            ctx.fillStyle = '#000';
+            ctx.fillText(label, rx + 5, by - 5);
+        });
+    }, []);
+
+    // ── WebSocket: send snapshot → Python face recognition → draw boxes ──
+    useEffect(() => {
+        let ws: WebSocket;
+        let interval: ReturnType<typeof setInterval>;
+
+        const capture = () => {
+            const video = videoRef.current;
+            const snap  = snapRef.current;
+            if (!video || !snap || video.readyState < 4 || video.paused || sendingRef.current) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+            // Always send at fixed 640x360 — Python coords will always be in this space
+            const nW = video.videoWidth  || 1280;
+            const nH = video.videoHeight || 720;
+
+            // object-cover crop from native frame into 640x360
+            const scale = Math.max(SNAP_W / nW, SNAP_H / nH);
+            const srcW  = SNAP_W / scale;
+            const srcH  = SNAP_H / scale;
+            const srcX  = (nW - srcW) / 2;
+            const srcY  = (nH - srcH) / 2;
+
+            snap.width  = SNAP_W;
+            snap.height = SNAP_H;
+            const ctx = snap.getContext('2d');
+            if (!ctx) return;
+            ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, SNAP_W, SNAP_H);
+
+            sendingRef.current = true;
+            snap.toBlob(blob => {
+                if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
+                sendingRef.current = false;
+            }, 'image/jpeg', 0.8);
+        };
+
+        const connect = () => {
+            ws = new WebSocket('ws://localhost:5000');
+            wsRef.current = ws;
+
+            ws.onopen  = () => { interval = setInterval(capture, 120); };
+
+            ws.onmessage = (evt) => {
+                try {
+                    const data  = JSON.parse(evt.data);
+                    const boxes = (data.boxes || []) as { x: number; y: number; w: number; h: number; name: string; conf: number }[];
+                    drawBoxes(boxes);
+
+                    // Activity log: ENTER immediately, LEAVE only after 1 min of continuous absence
+                    const currentNames = new Set<string>(
+                        boxes.filter(b => b.name && b.name !== 'Detecting...').map(b => b.name)
+                    );
+
+                    // Person disappeared — start 60s timer before logging LEAVE
+                    prevNamesRef.current.forEach(name => {
+                        if (!currentNames.has(name) && !leaveTimersRef.current.has(name)) {
+                            const t = setTimeout(() => {
+                                leaveTimersRef.current.delete(name);
+                                addActivityLog(`${name} left camera view`, 'LEAVE');
+                            }, 60_000);
+                            leaveTimersRef.current.set(name, t);
+                        }
+                    });
+
+                    // Person reappeared — cancel pending leave timer + log ENTER
+                    currentNames.forEach(name => {
+                        if (leaveTimersRef.current.has(name)) {
+                            clearTimeout(leaveTimersRef.current.get(name));
+                            leaveTimersRef.current.delete(name);
+                        }
+                        if (!prevNamesRef.current.has(name)) {
+                            addActivityLog(`${name} entered camera view`, 'ENTER');
+                        }
+                    });
+
+                    prevNamesRef.current = currentNames;
+                } catch {}
+            };
+
+            ws.onclose = () => { clearInterval(interval); setTimeout(connect, 3000); };
+        };
+
+        connect();
+        return () => {
+            clearInterval(interval);
+            ws?.close();
+            // Clear all pending leave timers on unmount
+            leaveTimersRef.current.forEach(t => clearTimeout(t));
+            leaveTimersRef.current.clear();
+        };
+    }, [drawBoxes, addActivityLog]);
 
     const loadPresenceData = async () => {
         if (!lectureId) return;
@@ -57,6 +226,29 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
             if (res.success) {
                 setPresenceData(res.data.students || []);
                 setPresenceStats(res.data.stats || null);
+            }
+
+            // Also load historical activity logs
+            const resLogs = await fetchWithAuth(`/door/lecture/${lectureId}`);
+            if (resLogs.success && resLogs.data?.students) {
+                const allEvents: ActivityLog[] = [];
+                resLogs.data.students.forEach((s: any) => {
+                    let currentStatus: string | null = null;
+                    s.events.forEach((ev: any) => {
+                        const ts = new Date(ev.timestamp);
+                        if ((ev.type === 'SEEN' || ev.type === 'ENTRY') && currentStatus !== 'SEEN') {
+                            currentStatus = 'SEEN';
+                            allEvents.push({ id: Math.random().toString(36).substring(7), message: `🟢 ${s.student.fullName} entered`, type: 'ENTER', timestamp: ts });
+                        } else if ((ev.type === 'ABSENT' || ev.type === 'EXIT') && currentStatus === 'SEEN') {
+                            currentStatus = 'ABSENT';
+                            allEvents.push({ id: Math.random().toString(36).substring(7), message: `🔴 ${s.student.fullName} left (absent)`, type: 'LEAVE', timestamp: ts });
+                        }
+                    });
+                });
+
+                // Sort descending by timestamp, take top 50
+                allEvents.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+                setActivityLogs(allEvents.slice(0, 50));
             }
         } catch (err) {
             console.error('Failed to load presence data', err);
@@ -75,7 +267,10 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
         socket.emit('join_section', sectionId);
 
         const handlePresenceUpdate = (payload: any) => {
-            if (payload.lectureId?.toString() !== lectureId?.toString()) return;
+            // Use loose comparison — lectureId may be ObjectId on server vs string from prop
+            const payloadLid = payload.lectureId?.toString?.() ?? payload.lectureId;
+            const ownLid = lectureId?.toString?.() ?? lectureId;
+            if (payloadLid && ownLid && payloadLid !== ownLid) return;
 
             setCameraActive(true);
             if (cameraActiveTimer.current) clearTimeout(cameraActiveTimer.current);
@@ -83,16 +278,15 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
 
             setPresenceData(prev => {
                 const existing = prev.find(s => s.student._id.toString() === payload.studentId.toString());
+                const prevStatus = existing?.currentStatus ?? null;
 
-                // If status changed to SEEN, they entered. If status changed to ABSENT, they left.
-                if (existing) {
-                    if (existing.currentStatus !== 'SEEN' && payload.status === 'SEEN') {
-                        addActivityLog(`🟢 ${payload.studentName} just entered`, 'ENTER');
-                    } else if (existing.currentStatus !== 'ABSENT' && payload.status === 'ABSENT') {
-                        addActivityLog(`🔴 ${payload.studentName} just left (absent)`, 'LEAVE');
-                    }
-                } else if (payload.status === 'SEEN') {
-                    addActivityLog(`🟢 ${payload.studentName} just entered`, 'ENTER');
+                // Log activity: ENTER on first detection or recovery from ABSENT
+                // LEAVE on transition from SEEN → ABSENT
+                if (payload.status === 'SEEN' && prevStatus !== 'SEEN') {
+                    // First time seen OR came back after being absent
+                    addActivityLog(`${payload.studentName} entered the classroom`, 'ENTER');
+                } else if (payload.status === 'ABSENT' && prevStatus === 'SEEN') {
+                    addActivityLog(`${payload.studentName} left (absent)`, 'LEAVE');
                 }
 
                 const updated: PresenceStudent = {
@@ -109,10 +303,20 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
                     currentlyPresent: payload.status === 'SEEN',
                 };
 
-                if (existing) {
-                    return prev.map(s => s.student._id.toString() === payload.studentId.toString() ? updated : s);
-                }
-                return [...prev, updated];
+                const newList = existing
+                    ? prev.map(s => s.student._id.toString() === payload.studentId.toString() ? updated : s)
+                    : [...prev, updated];
+
+                // Update stats from the live list (no extra API call needed)
+                const presentCount = newList.filter(s => s.currentlyPresent).length;
+                const absentCount = newList.filter(s => s.currentStatus === 'ABSENT').length;
+                const unseenCount = newList.filter(s => !s.currentStatus).length;
+                setPresenceStats(prev => prev
+                    ? { ...prev, present: presentCount, absent: absentCount, unseen: unseenCount }
+                    : { total: newList.length, present: presentCount, absent: absentCount, unseen: unseenCount }
+                );
+
+                return newList;
             });
         };
 
@@ -174,42 +378,54 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
                     </div>
                 )}
 
-                {/* ── LIVE MJPEG VIDEO FEED ── */}
-                <div className={`relative w-full aspect-video rounded-2xl overflow-hidden border border-white/10 bg-black/50 shadow-2xl ${(!cameraActive || loading) ? 'hidden' : 'block'}`}>
-                    <img
-                        src="http://localhost:5000/video_feed"
+                {/* ── LIVE CAMERA FEED (getUserMedia) + Canvas Overlay ── */}
+                <div className={`relative w-full aspect-video rounded-2xl overflow-hidden border border-white/10 bg-black shadow-2xl ${loading ? 'hidden' : 'block'}`}>
+
+                    {/* Native camera video — raw feed, no mirror */}
+                    <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
                         className="w-full h-full object-cover"
-                        alt="Live Classroom Feed"
-                        onLoad={() => setCameraActive(true)}
-                        onError={(e) => {
-                            setCameraActive(false);
-                            // Auto-retry fetching the live feed every 3 seconds if Python isn't up yet
-                            setTimeout(() => {
-                                if (e.target) (e.target as HTMLImageElement).src = `http://localhost:5000/video_feed?t=${Date.now()}`;
-                            }, 3000);
-                        }}
+                        onLoadedMetadata={() => { setCameraActive(true); }}
                     />
-                    <div className="absolute top-3 right-3 px-2 py-0.5 rounded text-[10px] font-bold bg-black/60 text-white/50 border border-white/10 backdrop-blur-sm shadow-md flex items-center gap-1.5">
-                        <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                        LIVE
-                    </div>
+
+                    {/* Canvas overlay — NOT CSS-mirrored; X-flip applied in drawBoxes() */}
+                    <canvas
+                        ref={canvasRef}
+                        className="absolute inset-0 w-full h-full pointer-events-none"
+                    />
+
+                    {/* Start Camera button (first load) */}
+                    {!cameraActive && !camError && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 z-10">
+                            <button
+                                onClick={startCamera}
+                                className="px-6 py-3 rounded-2xl bg-cyan-500 hover:bg-cyan-400 text-black font-black text-sm transition-all shadow-[0_0_20px_rgba(34,211,238,0.4)] hover:scale-105"
+                            >
+                                🎥 Start Camera
+                            </button>
+                            <p className="text-white/40 text-xs mt-3">Camera runs locally in browser — no video sent to server</p>
+                        </div>
+                    )}
+
+                    {camError && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 z-10">
+                            <WifiOff className="w-8 h-8 text-red-400 mb-3" />
+                            <p className="text-white/80 font-bold text-sm">{camError}</p>
+                        </div>
+                    )}
+
+                    {cameraActive && (
+                        <div className="absolute top-3 right-3 px-2 py-0.5 rounded text-[10px] font-bold bg-black/60 text-white/80 border border-cyan-500/30 backdrop-blur-sm shadow-md flex items-center gap-1.5 z-20">
+                            <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                            LIVE · Direct Camera
+                        </div>
+                    )}
                 </div>
 
-                {!loading && !cameraActive && (
-                    <div className="py-16 flex flex-col items-center justify-center text-center space-y-4 glass-card rounded-[24px] bg-black/20 border-dashed border-white/10">
-                        <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center">
-                            <span className="text-2xl opacity-40">🎥</span>
-                        </div>
-                        <div>
-                            <h3 className="text-white/60 font-bold mb-1">Camera Offline or Starting...</h3>
-                            <p className="text-white/30 text-sm max-w-[280px]">
-                                The high-speed MJPEG stream will appear automatically once the target connects.
-                            </p>
-                        </div>
-                    </div>
-                )}
-
-                <div className={`space-y-4 ${(!cameraActive || loading) ? 'hidden' : 'block'}`}>
+                <div className={`space-y-4 ${loading ? 'hidden' : 'block'}`}>
                     {/* Quick Stats */}
                     <div className="grid grid-cols-3 gap-4">
                         <div className="flex items-center gap-3 p-4 rounded-2xl bg-cyan-500/5 border border-cyan-500/10">
@@ -241,8 +457,9 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
                             {/* Sort SEEN first */}
                             {[...presenceData]
                                 .sort((a, b) => {
-                                    const order: Record<string, number> = { SEEN: 0, ABSENT: 1 };
-                                    return (order[a.currentStatus ?? ''] ?? 2) - (order[b.currentStatus ?? ''] ?? 2);
+                                    const order: Record<string, number> = { SEEN: 0, ABSENT: 2 };
+                                    // Unseen (null, never detected) appears in the middle (1) instead of after ABSENT
+                                    return (order[a.currentStatus ?? ''] ?? 1) - (order[b.currentStatus ?? ''] ?? 1);
                                 })
                                 .map((entry) => {
                                     const isPresent = entry.currentlyPresent;

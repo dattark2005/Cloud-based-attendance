@@ -54,10 +54,18 @@ const startCamera = () => {
 
     cameraProcess.stderr.on('data', (data) => {
         const text = data.toString().trim();
-        console.error(`[CAMERA ERROR] ${text}`);
-        try {
-            require('./socket').getIo().emit('camera:log', { type: 'error', text });
-        } catch (e) { /* ignore if socket not ready */ }
+        // Python logging module often uses stderr for INFO messages. Don't label it as an ERROR unless necessary.
+        if (text.toLowerCase().includes('error')) {
+            console.error(`[CAMERA] ${text}`);
+            try {
+                require('./socket').getIo().emit('camera:log', { type: 'error', text });
+            } catch (e) { /* ignore if socket not ready */ }
+        } else {
+            console.log(`[CAMERA] ${text}`);
+            try {
+                require('./socket').getIo().emit('camera:log', { type: 'info', text });
+            } catch (e) { /* ignore if socket not ready */ }
+        }
     });
 
     cameraProcess.on('error', (error) => {

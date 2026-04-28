@@ -53,47 +53,49 @@ const CameraCapture: React.FC<CameraCaptureProps> = ({ onCapture, title = "Captu
   return (
     <div className="flex flex-col items-center w-full max-w-md mx-auto space-y-4">
       <div className="relative w-full aspect-video rounded-3xl overflow-hidden glass-card border-2 border-white/10">
-        {/* Webcam always mounted — hidden when captured image is shown */}
-        <div style={{ display: imgSrc ? 'none' : 'block' }} className="w-full h-full">
-          <Webcam
-            audio={false}
-            ref={webcamRef}
-            screenshotFormat="image/jpeg"
-            screenshotQuality={0.92}
-            forceScreenshotSourceSize
-            videoConstraints={VIDEO_CONSTRAINTS}
-            onUserMedia={() => setIsReady(true)}
-            onUserMediaError={() => {
-              setError("Camera access denied. Please allow camera permissions.");
-              setIsReady(false);
-            }}
-            className="w-full h-full object-cover"
-            mirrored
-          />
-          {/* Face oval guide — no animation to reduce flicker */}
-          {isReady && (
-            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-              <div className="w-52 h-64 border-2 border-dashed border-white/30 rounded-[100%]" />
-            </div>
-          )}
-          {/* Capture button — always visible */}
-          {isReady && (
-            <div className="absolute bottom-4 left-0 right-0 flex justify-center">
-              <button
-                onClick={capture}
-                className="p-4 rounded-full bg-blue-500 hover:bg-blue-400 border-2 border-white/30 transition-colors shadow-lg shadow-blue-500/30"
-              >
-                <Camera className="w-7 h-7 text-white" />
-              </button>
-            </div>
-          )}
-          {/* Loading indicator */}
-          {!isReady && !error && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-              <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-            </div>
-          )}
-        </div>
+        {/* Webcam conditionally mounted — unmounted when captured image is shown to free camera */}
+        {!imgSrc && (
+          <div className="w-full h-full">
+            <Webcam
+              audio={false}
+              ref={webcamRef}
+              screenshotFormat="image/jpeg"
+              screenshotQuality={0.92}
+              forceScreenshotSourceSize
+              videoConstraints={VIDEO_CONSTRAINTS}
+              onUserMedia={() => setIsReady(true)}
+              onUserMediaError={() => {
+                setError("Camera access denied. Please allow camera permissions.");
+                setIsReady(false);
+              }}
+              className="w-full h-full object-cover"
+              mirrored
+            />
+            {/* Face oval guide — no animation to reduce flicker */}
+            {isReady && (
+              <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                <div className="w-52 h-64 border-2 border-dashed border-white/30 rounded-[100%]" />
+              </div>
+            )}
+            {/* Capture button — always visible */}
+            {isReady && (
+              <div className="absolute bottom-4 left-0 right-0 flex justify-center">
+                <button
+                  onClick={capture}
+                  className="p-4 rounded-full bg-blue-500 hover:bg-blue-400 border-2 border-white/30 transition-colors shadow-lg shadow-blue-500/30"
+                >
+                  <Camera className="w-7 h-7 text-white" />
+                </button>
+              </div>
+            )}
+            {/* Loading indicator */}
+            {!isReady && !error && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+                <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Captured image preview */}
         {imgSrc && (

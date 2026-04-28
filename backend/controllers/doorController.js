@@ -154,13 +154,18 @@ const logPresenceEvent = async (req, res, next) => {
             studentId,
             studentName: student.fullName,
             studentPrn: student.prn || student.email,
-            status,                          // 'SEEN' | 'ABSENT'
+            // 'SEEN' = in frame now | 'ABSENT' = left frame (temporarily out of camera view)
+            status,
+            // hadPresence: true if this student was seen at any point during this lecture.
+            // Frontend uses this to distinguish "left room" (amber) vs "never appeared" (gray).
+            // A student should NEVER be shown as "Absent from lecture" just for leaving the frame.
+            hadPresence: attendancePercentage > 0 || status === 'SEEN',
             confidence: confidence || 0,
             timestamp: log.timestamp,
             totalPresentMinutes: Math.round(totalPresentSeconds / 60),
             attendancePercentage,
             currentlyPresent: status === 'SEEN',
-            roomNumber: lecture.roomNumber, // include room from lecture for socket event
+            roomNumber: lecture.roomNumber,
         };
 
         // Broadcast real-time update to all clients in this section
