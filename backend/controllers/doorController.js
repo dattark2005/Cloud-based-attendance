@@ -135,7 +135,7 @@ const logPresenceEvent = async (req, res, next) => {
             { lectureId: lecture._id, studentId },
             {
                 $set: {
-                    status: attendancePercentage > 0 ? ATTENDANCE_STATUS.PRESENT : ATTENDANCE_STATUS.ABSENT,
+                    status: (status === 'SEEN' || attendancePercentage > 0) ? ATTENDANCE_STATUS.PRESENT : ATTENDANCE_STATUS.ABSENT,
                     totalPresentMinutes: Math.round(totalPresentSeconds / 60),
                     attendancePercentage,
                     verificationMethod: VERIFICATION_METHODS.FACE,

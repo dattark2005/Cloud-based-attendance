@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { User, Mail, Hash, BookOpen, Camera, ArrowRight, CheckCircle2, ChevronLeft, ShieldCheck, RefreshCw, Lock } from 'lucide-react';
@@ -10,7 +10,7 @@ import { fetchWithAuth } from '@/lib/api';
 
 type RegStep = 'INFO' | 'FACE_ENROLL' | 'SUCCESS';
 
-export default function RegisterPage() {
+function RegisterPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const isStandaloneFace = searchParams.get('only') === 'face';
@@ -523,5 +523,13 @@ export default function RegisterPage() {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-white"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div></div>}>
+      <RegisterPageContent />
+    </Suspense>
   );
 }

@@ -191,10 +191,11 @@ async def ws_handler(ws: WebSocketServerProtocol):
 
             now = time.time()
 
-            # Throttle: always reply with cached boxes, only run ML every SCAN_INTERVAL_SEC
+            # Throttle: reply immediately with cached boxes (may be empty if last scan found no faces)
+            # This ensures boxes disappear immediately without waiting for next ML scan
             if now - last_scan_time < SCAN_INTERVAL_SEC:
                 with name_cache_lock:
-                    cached = list(name_cache)
+                    cached = list(name_cache)  # will be [] if last scan found no faces
                 await ws.send(json.dumps({'boxes': _format_boxes(cached)}))
                 continue
 
@@ -223,7 +224,8 @@ async def ws_handler(ws: WebSocketServerProtocol):
             new_boxes = []
             for m in matches:
                 conf = m.get('confidence', 0)
-                if conf >= 0.35:
+                user_name = m.get('userName', m.get('userId', '?'))[:18]
+                if conf >= 0.35 or user_name == 'Unknown':
                     box = m.get('box')
                     if box:
                         orig_box = [
@@ -232,7 +234,7 @@ async def ws_handler(ws: WebSocketServerProtocol):
                         ]
                         new_boxes.append({
                             'box':  orig_box,
-                            'name': m.get('userName', m.get('userId', '?'))[:18],
+                            'name': user_name,
                             'conf': conf,
                         })
 

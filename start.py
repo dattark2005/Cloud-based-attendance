@@ -107,7 +107,7 @@ def build_services(with_camera: bool = True) -> list[dict]:
         },
         {
             "label": "FRONT",
-            "cmd"  : ["npm", "run", "dev"],
+            "cmd"  : ["npx", "next", "dev"],
             "cwd"  : FRONTEND_DIR,
             "shell": True,
         },

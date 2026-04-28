@@ -648,6 +648,13 @@ async def identify_group_endpoint(
                     })
                     logger.info(f"  ✅ Match: {best_match['name']} ({best_match['user_id']}) conf={best_score:.3f}")
                 else:
+                    box = [float(face[0]), float(face[1]), float(face[2]), float(face[3])]
+                    matches.append({
+                        "userId": "unknown",
+                        "userName": "Unknown",
+                        "confidence": 0.0,
+                        "box": box,
+                    })
                     logger.info(f"  ❌ No match for detected face")
             except Exception as face_err:
                 logger.warning(f"  Face processing error: {face_err}", exc_info=True)

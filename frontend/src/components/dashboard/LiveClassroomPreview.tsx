@@ -2,132 +2,171 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Activity, Wifi, WifiOff, Users, Loader2 } from 'lucide-react';
+import { Activity, WifiOff, Users, Loader2, Camera } from 'lucide-react';
 import { fetchWithAuth } from '@/lib/api';
 import { socketService } from '@/lib/socket';
 
-interface LiveClassroomPreviewProps {
-    activeSession: any; // The lecture object
-}
-
+interface LiveClassroomPreviewProps { activeSession: any; }
 interface PresenceStudent {
     student: { _id: string; fullName: string; prn?: string; email?: string; faceImageUrl?: string };
     currentStatus: 'SEEN' | 'ABSENT' | null;
-    lastSeen: string | null;
-    lastConfidence: number;
-    totalPresentMinutes: number;
-    attendancePercentage: number;
-    currentlyPresent: boolean;
+    lastSeen: string | null; lastConfidence: number;
+    totalPresentMinutes: number; attendancePercentage: number; currentlyPresent: boolean;
 }
+interface ActivityLog { id: string; message: string; type: 'ENTER' | 'LEAVE'; timestamp: Date; }
+interface FaceBox { x: number; y: number; w: number; h: number; name: string; conf: number; }
 
-interface ActivityLog {
-    id: string;
-    message: string;
-    type: 'ENTER' | 'LEAVE';
-    timestamp: Date;
-}
+// Snapshot size sent to Python — 16:9 to match standard webcam aspect ratio
+const SNAP_W = 640, SNAP_H = 360;
 
 export default function LiveClassroomPreview({ activeSession }: LiveClassroomPreviewProps) {
-    const lectureId = activeSession?._id;
-    const sectionId = activeSession?.sectionId?._id || activeSession?.sectionId;
+    const lectureId  = activeSession?._id;
+    const sectionId  = activeSession?.sectionId?._id || activeSession?.sectionId;
     const roomNumber = activeSession?.roomNumber;
 
-    const [presenceData, setPresenceData] = useState<PresenceStudent[]>([]);
+    const [presenceData,  setPresenceData]  = useState<PresenceStudent[]>([]);
     const [presenceStats, setPresenceStats] = useState<{ total: number; present: number; absent: number; unseen: number } | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [cameraActive, setCameraActive] = useState(false);
-    const [camError, setCamError] = useState<string | null>(null);
-    const cameraActiveTimer = useRef<NodeJS.Timeout | null>(null);
+    const [loading,       setLoading]       = useState(true);
+    const [cameraActive,  setCameraActive]  = useState(false);
+    const [camError,      setCamError]      = useState<string | null>(null);
+    const [modelsLoaded,  setModelsLoaded]  = useState(false);
+    const [activityLogs,  setActivityLogs]  = useState<ActivityLog[]>([]);
 
-    // Camera / canvas refs
-    const videoRef   = useRef<HTMLVideoElement>(null);
-    const canvasRef  = useRef<HTMLCanvasElement>(null);
-    const wsRef      = useRef<WebSocket | null>(null);
-    const snapRef    = useRef<HTMLCanvasElement | null>(null); // offscreen snap canvas
-    const sendingRef = useRef(false);
-    const prevNamesRef   = useRef<Set<string>>(new Set());
-    // Tracks per-name leave timers — LEAVE is only logged after 60s of absence
-    const leaveTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-
-    // Activity Logs
-    const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+    const videoRef        = useRef<HTMLVideoElement>(null);
+    const canvasRef       = useRef<HTMLCanvasElement>(null);
+    const snapRef         = useRef<HTMLCanvasElement | null>(null);
+    const wsRef           = useRef<WebSocket | null>(null);
+    const sendingRef      = useRef(false);
+    // Python boxes in SNAP coords — drawn each RAF frame scaled to display
+    const pythonBoxesRef  = useRef<FaceBox[]>([]);
+    const prevNamesRef    = useRef<Set<string>>(new Set());
+    const leaveTimersRef  = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+    const rafRef          = useRef<number>(0);
+    const cameraTimerRef  = useRef<NodeJS.Timeout | null>(null);
 
     const addActivityLog = useCallback((message: string, type: 'ENTER' | 'LEAVE') => {
-        const id = Math.random().toString(36).substring(7);
-        setActivityLogs(prev => [{ id, message, type, timestamp: new Date() }, ...prev].slice(0, 50));
+        setActivityLogs(prev => [{ id: Math.random().toString(36).slice(2), message, type, timestamp: new Date() }, ...prev].slice(0, 50));
     }, []);
 
-    // ── Start webcam via getUserMedia ──
+    // face-api models pre-loaded but not used for drawing
+    useEffect(() => {
+        import('face-api.js').then(async faceapi => {
+            await faceapi.nets.tinyFaceDetector.loadFromUri('/models').catch(() => {});
+            setModelsLoaded(true);
+        }).catch(() => {});
+    }, []);
+
+    // ── Start webcam ──
     const startCamera = useCallback(async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-                audio: false,
+                video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false,
             });
             const video = videoRef.current;
-            if (video) {
-                video.srcObject = stream;
-                await video.play();
-                setCameraActive(true);
-                setCamError(null);
-            }
+            if (video) { video.srcObject = stream; await video.play(); setCameraActive(true); setCamError(null); }
             snapRef.current = document.createElement('canvas');
-        } catch {
-            setCamError('Camera access denied — please allow camera permission and refresh.');
-        }
+        } catch { setCamError('Camera access denied — please allow camera permission and refresh.'); }
     }, []);
 
-    // Fixed resolution Python always receives — coords are always in this space
-    const SNAP_W = 640;
-    const SNAP_H = 360;
+    // Draw loop — Python boxes scaled precisely to display canvas
+    useEffect(() => {
+        if (!cameraActive) return;
+        let active = true;
 
-    // ── Draw boxes returned by Python onto the canvas overlay ──
-    const drawBoxes = useCallback((boxes: { x: number; y: number; w: number; h: number; name: string; conf: number }[]) => {
-        const canvas = canvasRef.current;
-        const video  = videoRef.current;
-        if (!canvas || !video) return;
+        const drawLoop = () => {
+            if (!active) return;
+            const video  = videoRef.current;
+            const canvas = canvasRef.current;
+            // Wait until video metadata is loaded so videoWidth/Height are real
+            if (!video || !canvas || video.readyState < 2) {
+                rafRef.current = requestAnimationFrame(drawLoop); return;
+            }
 
-        // Fit canvas to displayed video element
-        const rect = video.getBoundingClientRect();
-        if (rect.width === 0) return;
-        canvas.width  = rect.width;
-        canvas.height = rect.height;
+            const rect = canvas.getBoundingClientRect();
+            const dispW = Math.round(rect.width)  || video.clientWidth  || 640;
+            const dispH = Math.round(rect.height) || video.clientHeight || 360;
+            if (canvas.width !== dispW)  canvas.width  = dispW;
+            if (canvas.height !== dispH) canvas.height = dispH;
 
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const ctx = canvas.getContext('2d');
+            if (!ctx) { rafRef.current = requestAnimationFrame(drawLoop); return; }
+            ctx.clearRect(0, 0, dispW, dispH);
 
-        // Python coords are in SNAP_W x SNAP_H space — scale to canvas
-        const scaleX = canvas.width  / SNAP_W;
-        const scaleY = canvas.height / SNAP_H;
+            const boxes = pythonBoxesRef.current;
+            if (boxes.length === 0) { rafRef.current = requestAnimationFrame(drawLoop); return; }
 
-        boxes.forEach(b => {
-            const isKnown = !!b.name && b.name !== 'Detecting...';
+            const vidW = video.videoWidth  || SNAP_W;
+            const vidH = video.videoHeight || SNAP_H;
 
-            // Scale from snapshot space to canvas space
-            const bx = b.x * scaleX;
-            const by = b.y * scaleY;
-            const bw = b.w * scaleX;
-            const bh = b.h * scaleY;
+            // object-cover: fill display, preserve video aspect ratio
+            const coverScale = Math.max(dispW / vidW, dispH / vidH);
+            const rendW = vidW * coverScale;
+            const rendH = vidH * coverScale;
+            const offX  = (rendW - dispW) / 2;
+            const offY  = (rendH - dispH) / 2;
 
-            // Webcam display is mirrored — flip X so box follows the visual face
-            const rx = canvas.width - bx - bw;
+            // snapshot was full-frame scaled to SNAP_W x SNAP_H
+            const snapScaleX = vidW / SNAP_W;
+            const snapScaleY = vidH / SNAP_H;
 
-            ctx.strokeStyle = isKnown ? '#22d3ee' : '#f97316';
-            ctx.lineWidth   = 2;
-            ctx.strokeRect(rx, by, bw, bh);
+            boxes.forEach(b => {
+                // SNAP coords -> video coords
+                const vx = b.x * snapScaleX;
+                const vy = b.y * snapScaleY;
+                const vw = b.w * snapScaleX;
+                const vh = b.h * snapScaleY;
 
-            const label = isKnown ? `${b.name}  ${Math.round(b.conf * 100)}%` : 'Detecting...';
-            ctx.font = 'bold 13px Inter, sans-serif';
-            const tw = ctx.measureText(label).width;
-            ctx.fillStyle = isKnown ? 'rgba(34,211,238,0.9)' : 'rgba(249,115,22,0.85)';
-            ctx.fillRect(rx, by - 22, tw + 10, 22);
-            ctx.fillStyle = '#000';
-            ctx.fillText(label, rx + 5, by - 5);
-        });
-    }, []);
+                // video coords -> display coords (object-cover)
+                // Mirror X: browser shows webcam mirrored (like a real mirror),
+                // but raw pixel data is unmirrored. Flip X so box lands on the face.
+                const dx_raw = vx * coverScale - offX;
+                const dx = dispW - dx_raw - dw;
+                const dy = vy * coverScale - offY;
+                const dw = vw * coverScale;
+                const dh = vh * coverScale;
 
-    // ── WebSocket: send snapshot → Python face recognition → draw boxes ──
+                const isKnown   = !!b.name && b.name !== 'Detecting...' && b.name !== 'Unknown';
+                const isUnknown = b.name === 'Unknown';
+                const color   = isKnown ? '#22d3ee' : isUnknown ? '#ef4444' : '#f97316';
+                const bgColor = isKnown ? 'rgba(34,211,238,0.08)' : isUnknown ? 'rgba(239,68,68,0.08)' : 'rgba(249,115,22,0.08)';
+
+                ctx.fillStyle = bgColor;
+                ctx.fillRect(dx, dy, dw, dh);
+
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2.5;
+                ctx.lineCap = 'round';
+                const arm = Math.min(dw, dh) * 0.22;
+                ctx.beginPath();
+                ctx.moveTo(dx, dy + arm); ctx.lineTo(dx, dy); ctx.lineTo(dx + arm, dy);
+                ctx.moveTo(dx + dw - arm, dy); ctx.lineTo(dx + dw, dy); ctx.lineTo(dx + dw, dy + arm);
+                ctx.moveTo(dx + dw, dy + dh - arm); ctx.lineTo(dx + dw, dy + dh); ctx.lineTo(dx + dw - arm, dy + dh);
+                ctx.moveTo(dx + arm, dy + dh); ctx.lineTo(dx, dy + dh); ctx.lineTo(dx, dy + dh - arm);
+                ctx.stroke();
+
+                const label = isKnown ? `${b.name}  ${Math.round(b.conf * 100)}%`
+                            : isUnknown ? 'Unknown' : 'Detecting...';
+                ctx.font = 'bold 12px Inter, system-ui, sans-serif';
+                const tw = ctx.measureText(label).width;
+                const lx = Math.max(0, Math.min(dx, dispW - tw - 16));
+                const ly = dy > 28 ? dy - 28 : dy + dh + 4;
+
+                ctx.fillStyle = isKnown ? 'rgba(34,211,238,0.95)' : isUnknown ? 'rgba(239,68,68,0.95)' : 'rgba(249,115,22,0.95)';
+                ctx.beginPath();
+                ctx.roundRect(lx, ly, tw + 16, 24, 6);
+                ctx.fill();
+                ctx.fillStyle = '#000';
+                ctx.fillText(label, lx + 8, ly + 16);
+            });
+
+            if (active) rafRef.current = requestAnimationFrame(drawLoop);
+        };
+
+        drawLoop();
+        return () => { active = false; cancelAnimationFrame(rafRef.current); };
+    }, [cameraActive]);
+
+    // WebSocket: send full-frame snapshot -> Python -> store raw SNAP-coord boxes
     useEffect(() => {
         let ws: WebSocket;
         let interval: ReturnType<typeof setInterval>;
@@ -135,423 +174,259 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
         const capture = () => {
             const video = videoRef.current;
             const snap  = snapRef.current;
-            if (!video || !snap || video.readyState < 4 || video.paused || sendingRef.current) return;
+            if (!video || !snap || video.readyState < 4 || sendingRef.current) return;
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-            // Always send at fixed 640x360 — Python coords will always be in this space
-            const nW = video.videoWidth  || 1280;
-            const nH = video.videoHeight || 720;
-
-            // object-cover crop from native frame into 640x360
-            const scale = Math.max(SNAP_W / nW, SNAP_H / nH);
-            const srcW  = SNAP_W / scale;
-            const srcH  = SNAP_H / scale;
-            const srcX  = (nW - srcW) / 2;
-            const srcY  = (nH - srcH) / 2;
-
+            // Full frame (no crop) -> Python sees same view as display
             snap.width  = SNAP_W;
             snap.height = SNAP_H;
             const ctx = snap.getContext('2d');
             if (!ctx) return;
-            ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, SNAP_W, SNAP_H);
-
+            ctx.drawImage(video, 0, 0, SNAP_W, SNAP_H);
             sendingRef.current = true;
             snap.toBlob(blob => {
                 if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
                 sendingRef.current = false;
-            }, 'image/jpeg', 0.8);
+            }, 'image/jpeg', 0.82);
         };
 
         const connect = () => {
             ws = new WebSocket('ws://localhost:5000');
             wsRef.current = ws;
-
-            ws.onopen  = () => { interval = setInterval(capture, 120); };
-
+            ws.onopen    = () => { interval = setInterval(capture, 400); };
             ws.onmessage = (evt) => {
                 try {
-                    const data  = JSON.parse(evt.data);
-                    const boxes = (data.boxes || []) as { x: number; y: number; w: number; h: number; name: string; conf: number }[];
-                    drawBoxes(boxes);
+                    const data = JSON.parse(evt.data);
+                    const raw  = (data.boxes || []) as { x:number; y:number; w:number; h:number; name:string; conf:number }[];
+                    // Store boxes in SNAP coords; draw loop handles display scaling
+                    pythonBoxesRef.current = raw;
 
-                    // Activity log: ENTER immediately, LEAVE only after 1 min of continuous absence
-                    const currentNames = new Set<string>(
-                        boxes.filter(b => b.name && b.name !== 'Detecting...').map(b => b.name)
-                    );
-
-                    // Person disappeared — start 60s timer before logging LEAVE
+                    const currentNames = new Set<string>(raw.filter(b => b.name && b.name !== 'Detecting...' && b.name !== 'Unknown').map(b => b.name));
                     prevNamesRef.current.forEach(name => {
                         if (!currentNames.has(name) && !leaveTimersRef.current.has(name)) {
-                            const t = setTimeout(() => {
-                                leaveTimersRef.current.delete(name);
-                                addActivityLog(`${name} left camera view`, 'LEAVE');
-                            }, 60_000);
+                            // Log only after 3 minutes of continuous absence (box disappears immediately)
+                            const t = setTimeout(() => { leaveTimersRef.current.delete(name); addActivityLog(`${name} left camera view`, 'LEAVE'); }, 180_000);
                             leaveTimersRef.current.set(name, t);
                         }
                     });
-
-                    // Person reappeared — cancel pending leave timer + log ENTER
                     currentNames.forEach(name => {
-                        if (leaveTimersRef.current.has(name)) {
-                            clearTimeout(leaveTimersRef.current.get(name));
-                            leaveTimersRef.current.delete(name);
-                        }
-                        if (!prevNamesRef.current.has(name)) {
-                            addActivityLog(`${name} entered camera view`, 'ENTER');
-                        }
+                        if (leaveTimersRef.current.has(name)) { clearTimeout(leaveTimersRef.current.get(name)!); leaveTimersRef.current.delete(name); }
+                        if (!prevNamesRef.current.has(name)) addActivityLog(`${name} entered camera view`, 'ENTER');
                     });
-
                     prevNamesRef.current = currentNames;
                 } catch {}
             };
-
             ws.onclose = () => { clearInterval(interval); setTimeout(connect, 3000); };
         };
-
         connect();
-        return () => {
-            clearInterval(interval);
-            ws?.close();
-            // Clear all pending leave timers on unmount
-            leaveTimersRef.current.forEach(t => clearTimeout(t));
-            leaveTimersRef.current.clear();
-        };
-    }, [drawBoxes, addActivityLog]);
+        return () => { clearInterval(interval); ws?.close(); leaveTimersRef.current.forEach(t => clearTimeout(t)); };
+    }, [addActivityLog]);
 
-    const loadPresenceData = async () => {
-        if (!lectureId) return;
-        try {
-            setLoading(true);
-            const res = await fetchWithAuth(`/door/presence/${lectureId}`);
-            if (res.success) {
-                setPresenceData(res.data.students || []);
-                setPresenceStats(res.data.stats || null);
-            }
-
-            // Also load historical activity logs
-            const resLogs = await fetchWithAuth(`/door/lecture/${lectureId}`);
-            if (resLogs.success && resLogs.data?.students) {
-                const allEvents: ActivityLog[] = [];
-                resLogs.data.students.forEach((s: any) => {
-                    let currentStatus: string | null = null;
-                    s.events.forEach((ev: any) => {
-                        const ts = new Date(ev.timestamp);
-                        if ((ev.type === 'SEEN' || ev.type === 'ENTRY') && currentStatus !== 'SEEN') {
-                            currentStatus = 'SEEN';
-                            allEvents.push({ id: Math.random().toString(36).substring(7), message: `🟢 ${s.student.fullName} entered`, type: 'ENTER', timestamp: ts });
-                        } else if ((ev.type === 'ABSENT' || ev.type === 'EXIT') && currentStatus === 'SEEN') {
-                            currentStatus = 'ABSENT';
-                            allEvents.push({ id: Math.random().toString(36).substring(7), message: `🔴 ${s.student.fullName} left (absent)`, type: 'LEAVE', timestamp: ts });
-                        }
-                    });
-                });
-
-                // Sort descending by timestamp, take top 50
-                allEvents.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-                setActivityLogs(allEvents.slice(0, 50));
-            }
-        } catch (err) {
-            console.error('Failed to load presence data', err);
-        } finally {
-            setLoading(false);
-        }
-    };
-
+    // ── Presence data + socket ──
     useEffect(() => {
-        loadPresenceData();
-
+        const load = async () => {
+            if (!lectureId) return;
+            try {
+                setLoading(true);
+                const res = await fetchWithAuth(`/door/presence/${lectureId}`);
+                if (res.success) { setPresenceData(res.data.students || []); setPresenceStats(res.data.stats || null); }
+                const resLogs = await fetchWithAuth(`/door/lecture/${lectureId}`);
+                if (resLogs.success && resLogs.data?.students) {
+                    const evts: ActivityLog[] = [];
+                    resLogs.data.students.forEach((s: any) => {
+                        let cur: string | null = null;
+                        s.events.forEach((ev: any) => {
+                            const ts = new Date(ev.timestamp);
+                            if ((ev.type === 'SEEN' || ev.type === 'ENTRY') && cur !== 'SEEN') { cur = 'SEEN'; evts.push({ id: Math.random().toString(36).slice(2), message: `${s.student.fullName} entered`, type: 'ENTER', timestamp: ts }); }
+                            else if ((ev.type === 'ABSENT' || ev.type === 'EXIT') && cur === 'SEEN') { cur = 'ABSENT'; evts.push({ id: Math.random().toString(36).slice(2), message: `${s.student.fullName} left`, type: 'LEAVE', timestamp: ts }); }
+                        });
+                    });
+                    evts.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+                    setActivityLogs(evts.slice(0, 50));
+                }
+            } catch {} finally { setLoading(false); }
+        };
+        load();
         if (!sectionId) return;
-
-        // ── Socket Connection ──
         const socket = socketService.connect();
         socket.emit('join_section', sectionId);
-
-        const handlePresenceUpdate = (payload: any) => {
-            // Use loose comparison — lectureId may be ObjectId on server vs string from prop
-            const payloadLid = payload.lectureId?.toString?.() ?? payload.lectureId;
-            const ownLid = lectureId?.toString?.() ?? lectureId;
-            if (payloadLid && ownLid && payloadLid !== ownLid) return;
-
+        const onPresence = (p: any) => {
+            const pLid = p.lectureId?.toString?.() ?? p.lectureId;
+            const oLid = lectureId?.toString?.() ?? lectureId;
+            if (pLid && oLid && pLid !== oLid) return;
             setCameraActive(true);
-            if (cameraActiveTimer.current) clearTimeout(cameraActiveTimer.current);
-            cameraActiveTimer.current = setTimeout(() => setCameraActive(false), 30000);
-
+            if (cameraTimerRef.current) clearTimeout(cameraTimerRef.current);
+            cameraTimerRef.current = setTimeout(() => setCameraActive(false), 30000);
             setPresenceData(prev => {
-                const existing = prev.find(s => s.student._id.toString() === payload.studentId.toString());
+                const existing = prev.find(s => s.student._id.toString() === p.studentId.toString());
                 const prevStatus = existing?.currentStatus ?? null;
-
-                // Log activity: ENTER on first detection or recovery from ABSENT
-                // LEAVE on transition from SEEN → ABSENT
-                if (payload.status === 'SEEN' && prevStatus !== 'SEEN') {
-                    // First time seen OR came back after being absent
-                    addActivityLog(`${payload.studentName} entered the classroom`, 'ENTER');
-                } else if (payload.status === 'ABSENT' && prevStatus === 'SEEN') {
-                    addActivityLog(`${payload.studentName} left (absent)`, 'LEAVE');
-                }
-
+                if (p.status === 'SEEN' && prevStatus !== 'SEEN') addActivityLog(`${p.studentName} entered the classroom`, 'ENTER');
+                else if (p.status === 'ABSENT' && prevStatus === 'SEEN') addActivityLog(`${p.studentName} left (absent)`, 'LEAVE');
                 const updated: PresenceStudent = {
-                    student: existing?.student || {
-                        _id: payload.studentId,
-                        fullName: payload.studentName,
-                        prn: payload.studentPrn,
-                    },
-                    currentStatus: payload.status,
-                    lastSeen: payload.status === 'SEEN' ? payload.timestamp : (existing?.lastSeen || null),
-                    lastConfidence: payload.confidence || 0,
-                    totalPresentMinutes: payload.totalPresentMinutes,
-                    attendancePercentage: payload.attendancePercentage,
-                    currentlyPresent: payload.status === 'SEEN',
+                    student: existing?.student || { _id: p.studentId, fullName: p.studentName, prn: p.studentPrn },
+                    currentStatus: p.status, lastSeen: p.status === 'SEEN' ? p.timestamp : (existing?.lastSeen || null),
+                    lastConfidence: p.confidence || 0, totalPresentMinutes: p.totalPresentMinutes,
+                    attendancePercentage: p.attendancePercentage, currentlyPresent: p.status === 'SEEN',
                 };
-
-                const newList = existing
-                    ? prev.map(s => s.student._id.toString() === payload.studentId.toString() ? updated : s)
-                    : [...prev, updated];
-
-                // Update stats from the live list (no extra API call needed)
-                const presentCount = newList.filter(s => s.currentlyPresent).length;
-                const absentCount = newList.filter(s => s.currentStatus === 'ABSENT').length;
-                const unseenCount = newList.filter(s => !s.currentStatus).length;
-                setPresenceStats(prev => prev
-                    ? { ...prev, present: presentCount, absent: absentCount, unseen: unseenCount }
-                    : { total: newList.length, present: presentCount, absent: absentCount, unseen: unseenCount }
-                );
-
-                return newList;
+                const list = existing ? prev.map(s => s.student._id.toString() === p.studentId.toString() ? updated : s) : [...prev, updated];
+                setPresenceStats(ps => ps ? { ...ps, present: list.filter(s=>s.currentlyPresent).length, absent: list.filter(s=>s.currentStatus==='ABSENT').length, unseen: list.filter(s=>!s.currentStatus).length } : ps);
+                return list;
             });
         };
-
-        socket.on('presence:update', handlePresenceUpdate);
-
-        return () => {
-            socket.off('presence:update', handlePresenceUpdate);
-            if (cameraActiveTimer.current) clearTimeout(cameraActiveTimer.current);
-        };
-    }, [lectureId, sectionId]);
-
+        socket.on('presence:update', onPresence);
+        return () => { socket.off('presence:update', onPresence); if (cameraTimerRef.current) clearTimeout(cameraTimerRef.current); };
+    }, [lectureId, sectionId, addActivityLog]);
 
     return (
-        <div className="relative glass-card p-6 rounded-[35px] border-white/5 space-y-5 overflow-hidden">
-            {/* Background glow effects */}
-            <div className="absolute top-[-50px] right-[-50px] w-48 h-48 bg-cyan-500/10 rounded-full blur-[80px] pointer-events-none" />
-            <div className="absolute bottom-[-50px] left-[-50px] w-48 h-48 bg-primary/10 rounded-full blur-[80px] pointer-events-none" />
+        <div className="relative glass-card p-6 rounded-[28px] space-y-5 overflow-hidden">
+            {/* Ambient glows */}
+            <div className="absolute -top-12 -right-12 w-48 h-48 bg-cyan-500/10 rounded-full blur-[80px] pointer-events-none" />
+            <div className="absolute -bottom-12 -left-12 w-48 h-48 bg-blue-500/10 rounded-full blur-[80px] pointer-events-none" />
 
-            {/* Activity Logs have been moved to the bottom panel */}
-
-            <div className="relative z-10 flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 flex items-center justify-center">
-                        {cameraActive ? (
-                            <div className="relative flex items-center justify-center">
-                                <div className="absolute w-8 h-8 bg-cyan-400/30 rounded-full animate-ping" />
-                                <Activity className="w-6 h-6 text-cyan-400 relative z-10" />
-                            </div>
-                        ) : (
-                            <WifiOff className="w-6 h-6 text-white/40" />
-                        )}
+            {/* ── Header ── */}
+            <div className="relative z-10 flex items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 flex items-center justify-center shrink-0">
+                    {cameraActive
+                        ? <div className="relative"><div className="absolute w-8 h-8 bg-cyan-400/30 rounded-full animate-ping" /><Activity className="w-6 h-6 text-cyan-400 relative z-10" /></div>
+                        : <WifiOff className="w-6 h-6 text-white/40" />}
+                </div>
+                <div>
+                    <div className="flex items-center gap-3">
+                        <h2 className="text-2xl font-black tracking-tight text-white">Live Classroom</h2>
+                        <span className={`px-2.5 py-1 text-[9px] font-black uppercase tracking-widest rounded-full border ${cameraActive ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30 animate-pulse' : 'bg-white/5 text-white/30 border-white/10'}`}>
+                            {cameraActive ? 'Live Feed Active' : 'Waiting for camera'}
+                        </span>
                     </div>
-                    <div>
-                        <div className="flex items-center gap-3">
-                            <h2 className="text-2xl font-black tracking-tight text-white drop-shadow-sm">Live Classroom</h2>
-                            {cameraActive ? (
-                                <span className="px-2.5 py-1 text-[9px] font-black uppercase tracking-widest bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 rounded-full animate-pulse shadow-[0_0_15px_rgba(34,211,238,0.2)]">
-                                    Live Feed Active
-                                </span>
-                            ) : (
-                                <span className="px-2.5 py-1 text-[9px] font-black uppercase tracking-widest bg-white/10 text-white/40 border border-white/10 rounded-full">
-                                    Waiting for camera
-                                </span>
-                            )}
-                        </div>
-                        <p className="text-sm text-white/50 font-medium mt-1">
-                            {activeSession?.courseId?.courseName} · Room {roomNumber || 'Unknown'}
-                        </p>
-                    </div>
+                    <p className="text-sm text-white/50 font-medium mt-0.5">
+                        {activeSession?.courseId?.courseName} · Room {roomNumber || 'Unknown'}
+                        {modelsLoaded && <span className="ml-2 text-emerald-400/70 text-xs">· AI Ready</span>}
+                    </p>
                 </div>
             </div>
 
-            {/* Main Content Area */}
+            {/* ── Main content ── */}
             <div className="relative z-10 space-y-4">
                 {loading && (
-                    <div className="py-12 flex flex-col items-center justify-center space-y-4">
+                    <div className="py-12 flex flex-col items-center justify-center gap-3">
                         <Loader2 className="w-10 h-10 text-cyan-500 animate-spin" />
-                        <p className="text-sm text-white/50 font-medium animate-pulse">Connecting to live feed...</p>
+                        <p className="text-sm text-white/40 font-medium animate-pulse">Connecting to live feed...</p>
                     </div>
                 )}
 
-                {/* ── LIVE CAMERA FEED (getUserMedia) + Canvas Overlay ── */}
+                {/* ── Camera + Canvas ── */}
                 <div className={`relative w-full aspect-video rounded-2xl overflow-hidden border border-white/10 bg-black shadow-2xl ${loading ? 'hidden' : 'block'}`}>
+                    <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }} onLoadedMetadata={() => setCameraActive(true)} />
+                    <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
 
-                    {/* Native camera video — raw feed, no mirror */}
-                    <video
-                        ref={videoRef}
-                        autoPlay
-                        playsInline
-                        muted
-                        className="w-full h-full object-cover"
-                        onLoadedMetadata={() => { setCameraActive(true); }}
-                    />
-
-                    {/* Canvas overlay — NOT CSS-mirrored; X-flip applied in drawBoxes() */}
-                    <canvas
-                        ref={canvasRef}
-                        className="absolute inset-0 w-full h-full pointer-events-none"
-                    />
-
-                    {/* Start Camera button (first load) */}
+                    {/* Start camera overlay */}
                     {!cameraActive && !camError && (
-                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 z-10">
-                            <button
-                                onClick={startCamera}
-                                className="px-6 py-3 rounded-2xl bg-cyan-500 hover:bg-cyan-400 text-black font-black text-sm transition-all shadow-[0_0_20px_rgba(34,211,238,0.4)] hover:scale-105"
-                            >
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-10 gap-4">
+                            <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center mb-2">
+                                <Camera className="w-8 h-8 text-cyan-400" />
+                            </div>
+                            <button onClick={startCamera} className="px-6 py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-black font-black text-sm transition-all hover:scale-105 shadow-lg">
                                 🎥 Start Camera
                             </button>
-                            <p className="text-white/40 text-xs mt-3">Camera runs locally in browser — no video sent to server</p>
+                            <p className="text-white/30 text-xs">Camera runs locally — no video sent to server</p>
                         </div>
                     )}
 
+                    {/* Error overlay */}
                     {camError && (
-                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 z-10">
-                            <WifiOff className="w-8 h-8 text-red-400 mb-3" />
-                            <p className="text-white/80 font-bold text-sm">{camError}</p>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-10 gap-3">
+                            <WifiOff className="w-8 h-8 text-red-400" />
+                            <p className="text-white/80 font-bold text-sm text-center px-4">{camError}</p>
                         </div>
                     )}
 
+                    {/* LIVE badge */}
                     {cameraActive && (
-                        <div className="absolute top-3 right-3 px-2 py-0.5 rounded text-[10px] font-bold bg-black/60 text-white/80 border border-cyan-500/30 backdrop-blur-sm shadow-md flex items-center gap-1.5 z-20">
+                        <div className="absolute top-3 right-3 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-black/70 text-white/90 border border-cyan-500/30 backdrop-blur-sm flex items-center gap-1.5 z-20">
                             <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                            LIVE · Direct Camera
+                            LIVE · AI Detection
+                        </div>
+                    )}
+
+                    {/* Model loading badge */}
+                    {!modelsLoaded && cameraActive && (
+                        <div className="absolute top-3 left-3 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 backdrop-blur-sm flex items-center gap-1.5 z-20">
+                            <Loader2 className="w-3 h-3 animate-spin" /> Loading AI models...
                         </div>
                     )}
                 </div>
 
+                {/* ── Stats + Students ── */}
                 <div className={`space-y-4 ${loading ? 'hidden' : 'block'}`}>
-                    {/* Quick Stats */}
-                    <div className="grid grid-cols-3 gap-4">
-                        <div className="flex items-center gap-3 p-4 rounded-2xl bg-cyan-500/5 border border-cyan-500/10">
-                            <div className="w-1.5 h-8 bg-cyan-400 rounded-full shadow-[0_0_8px_rgba(34,211,238,0.5)]" />
-                            <div>
-                                <p className="text-2xl font-black text-white">{presenceStats?.present || 0}</p>
-                                <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">In Room</p>
+                    <div className="grid grid-cols-3 gap-3">
+                        {[
+                            { label: 'In Room', value: presenceStats?.present || 0, color: 'cyan' },
+                            { label: 'Absent',  value: presenceStats?.absent  || 0, color: 'red' },
+                            { label: 'Unseen',  value: presenceStats?.unseen  || 0, color: 'white' },
+                        ].map(({ label, value, color }) => (
+                            <div key={label} className={`flex items-center gap-3 p-4 rounded-2xl ${color === 'cyan' ? 'bg-cyan-500/5 border border-cyan-500/10' : color === 'red' ? 'bg-red-500/5 border border-red-500/10' : 'bg-white/5 border border-white/5'}`}>
+                                <div className={`w-1.5 h-8 rounded-full ${color === 'cyan' ? 'bg-cyan-400' : color === 'red' ? 'bg-red-400' : 'bg-white/20'}`} />
+                                <div>
+                                    <p className="text-2xl font-black text-white">{value}</p>
+                                    <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">{label}</p>
+                                </div>
                             </div>
-                        </div>
-                        <div className="flex items-center gap-3 p-4 rounded-2xl bg-red-500/5 border border-red-500/10">
-                            <div className="w-1.5 h-8 bg-red-400 rounded-full" />
-                            <div>
-                                <p className="text-2xl font-black text-white">{presenceStats?.absent || 0}</p>
-                                <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Absent</p>
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-3 p-4 rounded-2xl bg-white/5 border border-white/5">
-                            <div className="w-1.5 h-8 bg-white/20 rounded-full" />
-                            <div>
-                                <p className="text-2xl font-black text-white">{presenceStats?.unseen || 0}</p>
-                                <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Unseen</p>
-                            </div>
-                        </div>
+                        ))}
                     </div>
 
-                    {/* Mini Student Grid */}
-                    <div className="p-5 rounded-[24px] bg-black/40 border border-white/5">
+                    {/* Student avatar grid */}
+                    <div className="p-5 rounded-2xl bg-black/40 border border-white/5">
                         <div className="flex flex-wrap gap-2">
-                            {/* Sort SEEN first */}
                             {[...presenceData]
-                                .sort((a, b) => {
-                                    const order: Record<string, number> = { SEEN: 0, ABSENT: 2 };
-                                    // Unseen (null, never detected) appears in the middle (1) instead of after ABSENT
-                                    return (order[a.currentStatus ?? ''] ?? 1) - (order[b.currentStatus ?? ''] ?? 1);
-                                })
-                                .map((entry) => {
+                                .sort((a, b) => ((( { SEEN: 0, ABSENT: 2 } as any)[a.currentStatus ?? ''] ?? 1) - (( { SEEN: 0, ABSENT: 2 } as any)[b.currentStatus ?? ''] ?? 1)))
+                                .map(entry => {
                                     const isPresent = entry.currentlyPresent;
-                                    const isAbsent = entry.currentStatus === 'ABSENT';
-
+                                    const isAbsent  = entry.currentStatus === 'ABSENT';
                                     return (
-                                        <div
-                                            key={entry.student._id}
-                                            className="relative group cursor-default"
-                                        >
-                                            <motion.div
-                                                initial={{ scale: 0.8, opacity: 0 }}
-                                                animate={{ scale: 1, opacity: 1 }}
-                                                className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-black border-2 transition-all duration-300 ${isPresent
-                                                    ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.3)] hover:scale-110'
-                                                    : isAbsent
-                                                        ? 'bg-red-500/10 border-red-500/40 text-red-500 hover:scale-110'
-                                                        : 'bg-white/5 border-white/10 text-white/30 hover:bg-white/10'
-                                                    }`}
-                                            >
+                                        <div key={entry.student._id} className="relative group cursor-default">
+                                            <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+                                                className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-black border-2 transition-all duration-300 ${isPresent ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.3)] hover:scale-110' : isAbsent ? 'bg-red-500/10 border-red-500/40 text-red-400 hover:scale-110' : 'bg-white/5 border-white/10 text-white/30'}`}>
                                                 {entry.student.fullName?.charAt(0).toUpperCase()}
                                             </motion.div>
-
-                                            {/* Tooltip */}
                                             <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg bg-black/90 border border-white/10 text-xs font-bold text-white opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-20 pointer-events-none">
                                                 {entry.student.fullName}
-                                                <div className="text-[10px] font-medium text-white/50 mt-0.5">
-                                                    {isPresent ? 'In Room' : isAbsent ? 'Absent' : 'Unseen'}
-                                                </div>
+                                                <div className="text-[10px] text-white/50 mt-0.5">{isPresent ? 'In Room' : isAbsent ? 'Absent' : 'Unseen'}</div>
                                             </div>
                                         </div>
                                     );
-                                })
-                            }
+                                })}
                         </div>
                     </div>
                 </div>
             </div>
 
-            {/* ── PREMIUM STUDENT ACTIVITY LOGS ── */}
-            <div className="relative z-10 glass-card rounded-[24px] bg-black/40 border border-white/10 overflow-hidden mt-6 flex flex-col h-56">
-                <div className="flex items-center px-5 py-4 bg-white/5 border-b border-white/5 backdrop-blur-md">
-                    <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-blue-500/20 border border-blue-500/30 flex items-center justify-center">
-                            <Users className="w-4 h-4 text-blue-400" />
-                        </div>
-                        <div>
-                            <h3 className="text-sm font-bold text-white tracking-wide">Student Activity Log</h3>
-                            <p className="text-[10px] text-white/40 uppercase tracking-widest font-semibold mt-0.5">Real-time Presence Events</p>
-                        </div>
+            {/* ── Activity Log ── */}
+            <div className="relative z-10 rounded-2xl bg-black/40 border border-white/10 overflow-hidden flex flex-col h-56">
+                <div className="flex items-center gap-3 px-5 py-3 bg-white/5 border-b border-white/5">
+                    <div className="w-7 h-7 rounded-full bg-blue-500/20 border border-blue-500/30 flex items-center justify-center">
+                        <Users className="w-3.5 h-3.5 text-blue-400" />
+                    </div>
+                    <div>
+                        <h3 className="text-sm font-bold text-white">Student Activity Log</h3>
+                        <p className="text-[10px] text-white/40 uppercase tracking-widest font-semibold">Real-time Presence Events</p>
                     </div>
                 </div>
-
-                <div className="flex-1 overflow-y-auto p-5 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+                <div className="flex-1 overflow-y-auto p-4 space-y-2">
                     {activityLogs.length === 0 ? (
-                        <div className="flex flex-col items-center justify-center h-full text-white/20 pb-4">
-                            <Activity className="w-8 h-8 mb-2 opacity-20" />
-                            <p className="text-sm font-medium">No student activity logged yet</p>
-                            <p className="text-xs mt-1">Events will appear here when students enter or leave the camera view.</p>
+                        <div className="flex flex-col items-center justify-center h-full gap-2 text-white/20">
+                            <Activity className="w-7 h-7 opacity-30" />
+                            <p className="text-sm font-medium">No activity yet</p>
                         </div>
                     ) : (
-                        <div className="space-y-3 relative before:absolute before:inset-0 before:ml-5 before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-white/10 before:to-transparent">
-                            <AnimatePresence>
-                                {activityLogs.map((log) => (
-                                    <motion.div
-                                        key={log.id}
-                                        initial={{ opacity: 0, y: -10, scale: 0.95 }}
-                                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                                        layout
-                                        className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active"
-                                    >
-                                        <div className="flex items-center justify-center w-10 h-10 rounded-full border border-white/10 bg-black/50 backdrop-blur-sm shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 shadow-sm z-10 transition-colors duration-300">
-                                            {log.type === 'ENTER' ? (
-                                                <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.5)] animate-pulse" />
-                                            ) : (
-                                                <div className="w-2.5 h-2.5 rounded-full bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]" />
-                                            )}
-                                        </div>
-                                        <div className="w-[calc(100%-4rem)] md:w-[calc(50%-2.5rem)] glass-card p-3 rounded-2xl border-white/5 shadow-sm">
-                                            <div className="flex items-center justify-between">
-                                                <span className={`text-sm font-bold ${log.type === 'ENTER' ? 'text-emerald-100' : 'text-red-100/80'}`}>
-                                                    {log.message.replace('🟢 ', '').replace('🔴 ', '')}
-                                                </span>
-                                                <span className="text-[10px] font-bold text-white/30 uppercase tracking-widest bg-black/40 px-2 py-1 rounded-md">
-                                                    {log.timestamp.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    </motion.div>
-                                ))}
-                            </AnimatePresence>
-                        </div>
+                        <AnimatePresence>
+                            {activityLogs.map(log => (
+                                <motion.div key={log.id} initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} layout
+                                    className="flex items-center gap-3 px-3 py-2 rounded-xl bg-white/3 border border-white/5 hover:bg-white/5 transition-colors">
+                                    <div className={`w-2 h-2 rounded-full shrink-0 ${log.type === 'ENTER' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] animate-pulse' : 'bg-red-500'}`} />
+                                    <span className={`text-sm font-semibold flex-1 ${log.type === 'ENTER' ? 'text-emerald-200' : 'text-red-200/80'}`}>{log.message}</span>
+                                    <span className="text-[10px] text-white/30 font-bold shrink-0">{log.timestamp.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })}</span>
+                                </motion.div>
+                            ))}
+                        </AnimatePresence>
                     )}
                 </div>
             </div>
