@@ -16,8 +16,9 @@ interface PresenceStudent {
 interface ActivityLog { id: string; message: string; type: 'ENTER' | 'LEAVE'; timestamp: Date; }
 interface FaceBox { x: number; y: number; w: number; h: number; name: string; conf: number; }
 
-// Snapshot size sent to Python — 16:9 to match standard webcam aspect ratio
-const SNAP_W = 640, SNAP_H = 360;
+// Snapshot size sent to Python — smaller = faster encode/transfer/decode
+// SFace only needs ~112px per face so 320x180 is more than enough
+const SNAP_W = 320, SNAP_H = 180;
 
 export default function LiveClassroomPreview({ activeSession }: LiveClassroomPreviewProps) {
     const lectureId  = activeSession?._id;
@@ -36,9 +37,13 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
     const canvasRef       = useRef<HTMLCanvasElement>(null);
     const snapRef         = useRef<HTMLCanvasElement | null>(null);
     const wsRef           = useRef<WebSocket | null>(null);
-    const sendingRef      = useRef(false);
+    const sendingRef        = useRef(false);
     // Python boxes in SNAP coords — drawn each RAF frame scaled to display
-    const pythonBoxesRef  = useRef<FaceBox[]>([]);
+    const pythonBoxesRef    = useRef<FaceBox[]>([]);
+    // Timer ref: clears boxes only after 500ms of continuous empty responses
+    const clearBoxTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Smoothed box positions — EMA interpolation so boxes glide instead of teleport
+    const smoothedBoxesRef  = useRef<(FaceBox & { sx: number; sy: number; sw: number; sh: number })[]>([]);
     const prevNamesRef    = useRef<Set<string>>(new Set());
     const leaveTimersRef  = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const rafRef          = useRef<number>(0);
@@ -68,6 +73,27 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
         } catch { setCamError('Camera access denied — please allow camera permission and refresh.'); }
     }, []);
 
+    // ── Stable canvas dimensions via ResizeObserver ──
+    // NEVER resize canvas inside the draw loop — it forces a full browser repaint
+    // every frame which causes the video underneath to flicker.
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ro = new ResizeObserver(entries => {
+            for (const e of entries) {
+                const { width, height } = e.contentRect;
+                const w = Math.round(width);
+                const h = Math.round(height);
+                if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+                    canvas.width  = w;
+                    canvas.height = h;
+                }
+            }
+        });
+        ro.observe(canvas);
+        return () => ro.disconnect();
+    }, []);
+
     // Draw loop — Python boxes scaled precisely to display canvas
     useEffect(() => {
         if (!cameraActive) return;
@@ -77,22 +103,52 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
             if (!active) return;
             const video  = videoRef.current;
             const canvas = canvasRef.current;
-            // Wait until video metadata is loaded so videoWidth/Height are real
             if (!video || !canvas || video.readyState < 2) {
                 rafRef.current = requestAnimationFrame(drawLoop); return;
             }
 
-            const rect = canvas.getBoundingClientRect();
-            const dispW = Math.round(rect.width)  || video.clientWidth  || 640;
-            const dispH = Math.round(rect.height) || video.clientHeight || 360;
-            if (canvas.width !== dispW)  canvas.width  = dispW;
-            if (canvas.height !== dispH) canvas.height = dispH;
+            // Canvas dimensions are set by ResizeObserver — never changed here
+            const dispW = canvas.width  || 640;
+            const dispH = canvas.height || 360;
 
             const ctx = canvas.getContext('2d');
             if (!ctx) { rafRef.current = requestAnimationFrame(drawLoop); return; }
             ctx.clearRect(0, 0, dispW, dispH);
 
-            const boxes = pythonBoxesRef.current;
+            const targetBoxes = pythonBoxesRef.current;
+
+            // ── Exponential smoothing: glide the displayed box toward the target ──
+            // α = 0.35 means each frame moves 35% of the remaining distance.
+            // At 60fps this makes boxes reach target in ~100ms — completely smooth.
+            const α = 0.35;
+            if (targetBoxes.length === 0) {
+                if (smoothedBoxesRef.current.length === 0) {
+                    rafRef.current = requestAnimationFrame(drawLoop); return;
+                }
+            } else {
+                const next = targetBoxes.map(t => {
+                    const tcx = t.x + t.w / 2;
+                    const tcy = t.y + t.h / 2;
+                    const best = smoothedBoxesRef.current.find(s => {
+                        const dx = Math.abs(s.sx + s.sw / 2 - tcx);
+                        const dy = Math.abs(s.sy + s.sh / 2 - tcy);
+                        return dx < 80 && dy < 80;
+                    });
+                    if (best) {
+                        return {
+                            ...t,
+                            sx: best.sx + α * (t.x - best.sx),
+                            sy: best.sy + α * (t.y - best.sy),
+                            sw: best.sw + α * (t.w - best.sw),
+                            sh: best.sh + α * (t.h - best.sh),
+                        };
+                    }
+                    return { ...t, sx: t.x, sy: t.y, sw: t.w, sh: t.h };
+                });
+                smoothedBoxesRef.current = next;
+            }
+
+            const boxes = smoothedBoxesRef.current;
             if (boxes.length === 0) { rafRef.current = requestAnimationFrame(drawLoop); return; }
 
             const vidW = video.videoWidth  || SNAP_W;
@@ -110,19 +166,19 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
             const snapScaleY = vidH / SNAP_H;
 
             boxes.forEach(b => {
-                // SNAP coords -> video coords
-                const vx = b.x * snapScaleX;
-                const vy = b.y * snapScaleY;
-                const vw = b.w * snapScaleX;
-                const vh = b.h * snapScaleY;
+                // SNAP coords -> video coords (use smoothed sx/sy/sw/sh)
+                const vx = b.sx * snapScaleX;
+                const vy = b.sy * snapScaleY;
+                const vw = b.sw * snapScaleX;
+                const vh = b.sh * snapScaleY;
 
                 // video coords -> display coords (object-cover)
                 // Mirror X: browser shows webcam mirrored (like a real mirror),
                 // but raw pixel data is unmirrored. Flip X so box lands on the face.
                 const dx_raw = vx * coverScale - offX;
+                const dw = vw * coverScale;
                 const dx = dispW - dx_raw - dw;
                 const dy = vy * coverScale - offY;
-                const dw = vw * coverScale;
                 const dh = vh * coverScale;
 
                 const isKnown   = !!b.name && b.name !== 'Detecting...' && b.name !== 'Unknown';
@@ -166,6 +222,8 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
         return () => { active = false; cancelAnimationFrame(rafRef.current); };
     }, [cameraActive]);
 
+
+
     // WebSocket: send full-frame snapshot -> Python -> store raw SNAP-coord boxes
     useEffect(() => {
         let ws: WebSocket;
@@ -174,6 +232,7 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
         const capture = () => {
             const video = videoRef.current;
             const snap  = snapRef.current;
+            // Strict back-pressure: wait until previous frame is processed by the server
             if (!video || !snap || video.readyState < 4 || sendingRef.current) return;
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
@@ -185,21 +244,40 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
             ctx.drawImage(video, 0, 0, SNAP_W, SNAP_H);
             sendingRef.current = true;
             snap.toBlob(blob => {
-                if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
-                sendingRef.current = false;
-            }, 'image/jpeg', 0.82);
+                if (blob && ws.readyState === WebSocket.OPEN) {
+                    ws.send(blob);
+                } else {
+                    sendingRef.current = false; // Reset if send fails
+                }
+            }, 'image/jpeg', 0.6);
         };
 
         const connect = () => {
-            ws = new WebSocket('ws://localhost:5000');
+            ws = new WebSocket('ws://localhost:8082/ws/live-detect');
             wsRef.current = ws;
-            ws.onopen    = () => { interval = setInterval(capture, 400); };
+            // Send frames at 15 FPS (~66ms interval)
+            ws.onopen    = () => { interval = setInterval(capture, 66); };
             ws.onmessage = (evt) => {
+                sendingRef.current = false; // Reset back-pressure flag when server responds!
                 try {
                     const data = JSON.parse(evt.data);
-                    const raw  = (data.boxes || []) as { x:number; y:number; w:number; h:number; name:string; conf:number }[];
-                    // Store boxes in SNAP coords; draw loop handles display scaling
-                    pythonBoxesRef.current = raw;
+                    const raw  = (data.boxes || []) as FaceBox[];
+                    if (raw.length > 0) {
+                        // Non-empty: update immediately and cancel any pending clear
+                        pythonBoxesRef.current = raw;
+                        if (clearBoxTimerRef.current) {
+                            clearTimeout(clearBoxTimerRef.current);
+                            clearBoxTimerRef.current = null;
+                        }
+                    } else {
+                        // Empty: only clear boxes after 500ms of continuous empty responses
+                        if (!clearBoxTimerRef.current) {
+                            clearBoxTimerRef.current = setTimeout(() => {
+                                pythonBoxesRef.current = [];
+                                clearBoxTimerRef.current = null;
+                            }, 500);
+                        }
+                    }
 
                     const currentNames = new Set<string>(raw.filter(b => b.name && b.name !== 'Detecting...' && b.name !== 'Unknown').map(b => b.name));
                     prevNamesRef.current.forEach(name => {
@@ -219,7 +297,12 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
             ws.onclose = () => { clearInterval(interval); setTimeout(connect, 3000); };
         };
         connect();
-        return () => { clearInterval(interval); ws?.close(); leaveTimersRef.current.forEach(t => clearTimeout(t)); };
+        return () => {
+            clearInterval(interval);
+            ws?.close();
+            leaveTimersRef.current.forEach(t => clearTimeout(t));
+            if (clearBoxTimerRef.current) clearTimeout(clearBoxTimerRef.current);
+        };
     }, [addActivityLog]);
 
     // ── Presence data + socket ──

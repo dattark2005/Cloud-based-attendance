@@ -13,11 +13,12 @@ import sys
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 from PIL import Image
 import io
+import asyncio
 import cloudinary
 import cloudinary.uploader
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -92,6 +93,13 @@ face_recognizer = cv2.FaceRecognizerSF.create(SFACE_PATH, "")
 
 print("✅ OpenCV FaceDetectorYN + FaceRecognizerSF loaded")
 
+# ── Thread pool for ML inference (2 workers = overlap I/O with compute) ──
+import concurrent.futures
+import threading
+_ml_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="face_ml")
+_detector_lock = threading.Lock()   # YuNet is NOT thread-safe; serialize calls
+_last_input_size = (0, 0)           # cache to skip redundant setInputSize calls
+
 # ==================== CONFIGURATION ====================
 
 EMBEDDING_DIM = 128          # SFace outputs 128-dim vector
@@ -135,10 +143,12 @@ db = mongo_client.attendance
 # ==================== HELPERS ====================
 
 def image_bytes_to_bgr(data: bytes) -> np.ndarray:
-    """Convert raw image bytes to BGR numpy array (OpenCV format)."""
-    img = Image.open(io.BytesIO(data))
-    rgb = np.array(img.convert('RGB'))
-    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    """Convert raw image bytes to BGR numpy array (OpenCV format) natively in C++ for maximum speed."""
+    arr = np.frombuffer(data, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise ValueError("Could not decode image bytes")
+    return bgr
 
 
 def detect_face(image_bgr: np.ndarray):
@@ -159,10 +169,16 @@ def detect_face(image_bgr: np.ndarray):
 def detect_all_faces(image_bgr: np.ndarray):
     """
     Detect all faces using YuNet. Returns a list of all detected faces.
+    Uses a lock because YuNet is not thread-safe.
+    Caches the last input size to skip redundant setInputSize calls.
     """
+    global _last_input_size
     h, w = image_bgr.shape[:2]
-    face_detector.setInputSize((w, h))
-    _, faces = face_detector.detect(image_bgr)
+    with _detector_lock:
+        if (w, h) != _last_input_size:
+            face_detector.setInputSize((w, h))
+            _last_input_size = (w, h)
+        _, faces = face_detector.detect(image_bgr)
     if faces is None or len(faces) == 0:
         return []
     return faces
@@ -577,12 +593,17 @@ async def identify_multiple_faces_endpoint(
         raise HTTPException(500, detail=str(e))
 
 
+# Global cache for database embeddings to avoid querying MongoDB on every frame
+_group_cache = []
+_group_cache_ts = 0.0
+
 @app.post("/identify-group")
 async def identify_group_endpoint(
     file: UploadFile = File(...),
     expected_user_ids: str = Form(None)
 ):
     """Identify multiple persons in a group photo. Optionally restrict to expected_user_ids."""
+    global _group_cache, _group_cache_ts
     try:
         data = await file.read()
         bgr = image_bytes_to_bgr(data)
@@ -591,36 +612,52 @@ async def identify_group_endpoint(
         if len(faces) == 0:
             return {"identifiedCount": 0, "matches": [], "totalFaces": 0}
 
-        query = {"faceEncoding": {"$exists": True}}
+        now = time.time()
         if expected_user_ids:
+            # If expected_user_ids is provided, query DB directly (usually small)
             ids_list = []
             for uid in expected_user_ids.split(","):
                 uid = uid.strip()
                 if uid:
-                    try:
-                        ids_list.append(ObjectId(uid))
-                    except Exception:
-                        pass
-            if ids_list:
-                query["_id"] = {"$in": ids_list}
-
-        users = await db.users.find(query).to_list(1000)
-        logger.info(f"identify-group: {len(faces)} faces, {len(users)} DB users in pool")
-
-        # Pre-parse embeddings
-        db_embeddings = []
-        for u in users:
-            raw = u.get('faceEncoding')
-            if raw is None:
-                continue
-            if hasattr(raw, 'read'): raw = raw.read()
-            elif not isinstance(raw, (bytes, bytearray)): raw = bytes(raw)
-            if len(raw) == 1024:
-                db_embeddings.append({
-                    "user_id": str(u["_id"]),
-                    "name": u.get("fullName", "Unknown"),
-                    "embedding": np.frombuffer(raw, dtype=np.float64).copy()  # .copy() avoids read-only numpy error
-                })
+                    try: ids_list.append(ObjectId(uid))
+                    except Exception: pass
+            
+            query = {"faceEncoding": {"$exists": True}, "_id": {"$in": ids_list}}
+            users = await db.users.find(query).to_list(1000)
+            
+            db_embeddings = []
+            for u in users:
+                raw = u.get('faceEncoding')
+                if raw is None: continue
+                if hasattr(raw, 'read'): raw = raw.read()
+                elif not isinstance(raw, (bytes, bytearray)): raw = bytes(raw)
+                if len(raw) == 1024:
+                    db_embeddings.append({
+                        "user_id": str(u["_id"]),
+                        "name": u.get("fullName", "Unknown"),
+                        "embedding": np.frombuffer(raw, dtype=np.float64).copy()
+                    })
+        else:
+            # Full pool search: use 10-second cache to prevent MongoDB spam on every frame!
+            if now - _group_cache_ts > 10:
+                users = await db.users.find({"faceEncoding": {"$exists": True}}).to_list(1000)
+                new_cache = []
+                for u in users:
+                    raw = u.get('faceEncoding')
+                    if raw is None: continue
+                    if hasattr(raw, 'read'): raw = raw.read()
+                    elif not isinstance(raw, (bytes, bytearray)): raw = bytes(raw)
+                    if len(raw) == 1024:
+                        new_cache.append({
+                            "user_id": str(u["_id"]),
+                            "name": u.get("fullName", "Unknown"),
+                            "embedding": np.frombuffer(raw, dtype=np.float64).copy()
+                        })
+                _group_cache = new_cache
+                _group_cache_ts = now
+                logger.info(f"Updated group DB cache: {len(_group_cache)} users loaded.")
+            
+            db_embeddings = _group_cache
 
         if not db_embeddings:
             logger.warning("  No valid embeddings found in DB pool")
@@ -679,7 +716,204 @@ def health_check():
     }
 
 
-import tempfile
+# ==================== WEBSOCKET LIVE DETECTION ====================
+# Direct WebSocket endpoint — browser connects here instead of going
+# through the live_camera_sync.py HTTP middleman. Eliminates one full
+# HTTP round-trip per frame, matching the architecture of the old project.
+
+# DB embedding cache shared across all WS connections
+_ws_user_cache: list = []
+_ws_user_cache_ts: float = 0.0
+_ws_cache_refreshing: bool = False
+
+
+@app.websocket("/ws/live-detect")
+async def ws_live_detect(websocket: WebSocket):
+    """
+    Real-time face detection + recognition over WebSocket.
+    Client sends: raw JPEG bytes (~15 fps with back-pressure)
+    Server returns JSON: {"boxes": [{"x","y","w","h","name","conf"}, ...]}
+    """
+    global _ws_user_cache, _ws_user_cache_ts, _ws_cache_refreshing
+
+    await websocket.accept()
+    logger.info("WS /ws/live-detect client connected")
+
+    # Stricter thresholds for live detection to avoid false positives
+    WS_COSINE_THRESHOLD = 0.42   # higher than HTTP default (0.363)
+    WS_MIN_MARGIN       = 0.06   # must beat 2nd-best by this margin
+
+    # ── Sticky identity cache (per-connection) ──
+    # Stores {face_region_key: {"name": str, "conf": float, "miss_count": int}}
+    # When a face is identified, we hold that label for up to STICKY_FRAMES
+    # consecutive "Unknown" frames before actually showing Unknown.
+    # This eliminates single-frame flicker from angle/lighting variation.
+    STICKY_FRAMES = 6   # ~400ms at 15fps before Unknown is shown
+    sticky: dict = {}   # key = "cx_cy" bucket → {name, conf, miss_count}
+
+    def _region_key(fx, fy, fw, fh) -> str:
+        """Coarse bucket key for a face region — tolerates small position jitter."""
+        cx = round(float(fx + fw / 2) / 50)   # bucket to nearest 50px
+        cy = round(float(fy + fh / 2) / 50)
+        return f"{cx}_{cy}"
+
+    try:
+        while True:
+            try:
+                raw_bytes = await websocket.receive_bytes()
+            except WebSocketDisconnect:
+                break
+
+            if not raw_bytes or len(raw_bytes) < 100:
+                await websocket.send_json({"boxes": []})
+                continue
+
+            # ── 1. Refresh DB embedding cache (async, before heavy ML work) ──
+            now = time.time()
+            if now - _ws_user_cache_ts > 10 and not _ws_cache_refreshing:
+                _ws_cache_refreshing = True
+                try:
+                    users = await db.users.find({"faceEncoding": {"$exists": True}}).to_list(1000)
+                    new_cache = []
+                    for u in users:
+                        raw = u.get("faceEncoding")
+                        if raw is None: continue
+                        if hasattr(raw, "read"): raw = raw.read()
+                        elif not isinstance(raw, (bytes, bytearray)): raw = bytes(raw)
+                        if len(raw) == 1024:
+                            new_cache.append({
+                                "user_id": str(u["_id"]),
+                                "name": u.get("fullName", "Unknown"),
+                                "embedding": np.frombuffer(raw, dtype=np.float64).copy()
+                            })
+                    _ws_user_cache = new_cache
+                    _ws_user_cache_ts = now
+                    logger.info(f"WS cache refreshed: {len(_ws_user_cache)} users")
+                finally:
+                    _ws_cache_refreshing = False
+
+            # Snapshot cache for this frame so the thread doesn't touch the global
+            frame_cache = list(_ws_user_cache)
+
+            # ── 2. Run ML inference in dedicated thread pool ──
+            def process_frame():
+                arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if bgr is None:
+                    return []
+
+                faces = detect_all_faces(bgr)
+                if len(faces) == 0:
+                    return []
+
+                # Score every face against every DB user
+                result_grid = []
+                for face in faces:
+                    try:
+                        aligned = face_recognizer.alignCrop(bgr, face)
+                        cur_emb = face_recognizer.feature(aligned).flatten().astype(np.float64)
+                        scores = []
+                        for db_user in frame_cache:
+                            r = match_score(db_user["embedding"], cur_emb)
+                            scores.append((r["cosine_score"], db_user))
+                        scores.sort(key=lambda t: t[0], reverse=True)
+                        result_grid.append((face, scores))
+                    except Exception as ex:
+                        logger.debug(f"WS per-face embed error: {ex}")
+                        result_grid.append((face, []))
+
+                # Greedy dedup: each DB user assigned to exactly ONE face
+                assigned_users: dict = {}
+                for face_idx, (face, scores) in enumerate(result_grid):
+                    if not scores:
+                        continue
+                    top_score, top_user = scores[0]
+                    second_score = scores[1][0] if len(scores) > 1 else 0.0
+                    margin = top_score - second_score
+
+                    if top_score < WS_COSINE_THRESHOLD:
+                        continue
+                    if margin < WS_MIN_MARGIN and second_score > (WS_COSINE_THRESHOLD - 0.05):
+                        continue
+
+                    uid = top_user["user_id"]
+                    if uid not in assigned_users or top_score > result_grid[assigned_users[uid]][1][0][0]:
+                        assigned_users[uid] = face_idx
+
+                # Build raw box list (before sticky smoothing)
+                boxes = []
+                for face_idx, (face, scores) in enumerate(result_grid):
+                    fx, fy, fw, fh = face[0], face[1], face[2], face[3]
+                    matched_name = "Unknown"
+                    matched_conf = 0.0
+                    for uid, winner_idx in assigned_users.items():
+                        if winner_idx == face_idx:
+                            for sc, db_user in scores:
+                                if db_user["user_id"] == uid:
+                                    matched_name = db_user["name"]
+                                    matched_conf = sc
+                                    break
+                            break
+                    boxes.append({
+                        "x":    float(fx),
+                        "y":    float(fy),
+                        "w":    float(fw),
+                        "h":    float(fh),
+                        "name": matched_name,
+                        "conf": round(float(matched_conf), 3),
+                    })
+                return boxes
+
+            loop = asyncio.get_running_loop()
+            raw_boxes = await loop.run_in_executor(_ml_executor, process_frame)
+
+            # ── 3. Apply sticky smoothing ──
+            # Track which sticky keys were seen this frame
+            seen_keys = set()
+            smoothed_boxes = []
+
+            for b in raw_boxes:
+                key = _region_key(b["x"], b["y"], b["w"], b["h"])
+                seen_keys.add(key)
+
+                if b["name"] != "Unknown":
+                    # Identified → update sticky, reset miss counter
+                    sticky[key] = {"name": b["name"], "conf": b["conf"], "miss_count": 0}
+                    smoothed_boxes.append(b)
+                else:
+                    # Unknown — use last known identity if within STICKY_FRAMES
+                    if key in sticky and sticky[key]["miss_count"] < STICKY_FRAMES:
+                        sticky[key]["miss_count"] += 1
+                        # Show the held identity at slightly reduced conf
+                        held = sticky[key]
+                        smoothed_boxes.append({**b, "name": held["name"], "conf": held["conf"] * 0.9})
+                    else:
+                        # Sticky expired — genuinely Unknown
+                        sticky.pop(key, None)
+                        smoothed_boxes.append(b)
+
+            # Age out sticky entries for faces that have left frame
+            for key in list(sticky.keys()):
+                if key not in seen_keys:
+                    sticky[key]["miss_count"] += 1
+                    if sticky[key]["miss_count"] > STICKY_FRAMES * 2:
+                        del sticky[key]
+
+            await websocket.send_json({"boxes": smoothed_boxes})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"WS live-detect error: {e}", exc_info=True)
+    finally:
+        logger.info("WS /ws/live-detect client disconnected")
+
+
+
+
+
+
+
 import json
 from fastapi import UploadFile, File
 

@@ -97,7 +97,7 @@ def free_ports():
     time.sleep(1)   # let OS release ports
 
 # ── Service definitions ───────────────────────────────────────────────────────
-def build_services(with_camera: bool = True) -> list[dict]:
+def build_services(with_camera: bool = False) -> list[dict]:
     services = [
         {
             "label": "NODE+FACE+VOICE",
@@ -141,7 +141,6 @@ def launch_all(with_camera: bool):
         f"\n  Backend    ->  http://localhost:3001"
         f"\n  Face API   ->  http://localhost:8082"
         f"\n  Voice API  ->  http://localhost:8081"
-        f"\n  Camera     ->  live_camera_sync.py"
         f"\n====================================================="
         f"\n  Press Ctrl+C to stop all services"
         f"\n{RESET}"
@@ -203,17 +202,9 @@ def shutdown():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Master launcher for Cloud-Based Attendance System")
-    parser.add_argument(
-        "--no-camera",
-        action="store_true",
-        help="Skip live_camera_sync.py (run without classroom camera)"
-    )
-    args = parser.parse_args()
-
     # Register signal handler for clean exit on Windows
     signal.signal(signal.SIGINT,  lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     signal.signal(signal.SIGTERM, lambda *_: shutdown())
 
-    launch_all(with_camera=not args.no_camera)
+    launch_all(with_camera=False)
 

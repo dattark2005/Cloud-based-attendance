@@ -15,6 +15,7 @@ __pycache__/
 out/
 build/
 dist/
+.venv/
 
 # Testing
 coverage/

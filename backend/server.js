@@ -182,6 +182,16 @@ httpServer.listen(PORT, () => {
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
+
+  // Auto-resume camera if any lecture is currently ongoing
+  const Lecture = require('./models/Lecture');
+  Lecture.findOne({ status: 'ONGOING' }).then(ongoing => {
+      if (ongoing) {
+          console.log(`📡 Resuming camera monitor for ongoing lecture: ${ongoing._id}`);
+          const { startCamera } = require('./utils/cameraManager');
+          startCamera();
+      }
+  }).catch(err => console.error("Error checking ongoing lectures:", err));
 });
 
 // Handle unhandled promise rejections
