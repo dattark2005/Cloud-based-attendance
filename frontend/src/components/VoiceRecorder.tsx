@@ -18,40 +18,40 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
   const mediaRecorder = useRef<MediaRecorder | null>(null);
   const chunks = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const autoStopRef = useRef<NodeJS.Timeout | null>(null);
+  const MAX_DURATION = 6; // auto-stop after 6 seconds
 
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder.current = new MediaRecorder(stream);
+      // Use webm/opus (actual MediaRecorder format on Chrome/Firefox)
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus' : 'audio/webm';
+      mediaRecorder.current = new MediaRecorder(stream, { mimeType });
       chunks.current = [];
 
       mediaRecorder.current.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          chunks.current.push(e.data);
-        }
+        if (e.data.size > 0) chunks.current.push(e.data);
       };
 
       mediaRecorder.current.onstop = async () => {
-        const blob = new Blob(chunks.current, { type: 'audio/wav' });
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(chunks.current, { type: mimeType });
         const url = URL.createObjectURL(blob);
         setAudioUrl(url);
-
         const reader = new FileReader();
         reader.readAsDataURL(blob);
-        reader.onloadend = () => {
-          const base64data = reader.result as string;
-          setAudioBase64(base64data);
-        };
+        reader.onloadend = () => setAudioBase64(reader.result as string);
       };
 
       mediaRecorder.current.start();
       setIsRecording(true);
       setDuration(0);
-      timerRef.current = setInterval(() => {
-        setDuration(prev => prev + 1);
-      }, 1000);
+      timerRef.current = setInterval(() => setDuration(prev => prev + 1), 1000);
+      // Auto-stop at MAX_DURATION
+      autoStopRef.current = setTimeout(() => stopRecording(), MAX_DURATION * 1000);
     } catch (err) {
-      console.error("Microphone access denied", err);
+      console.error('Microphone access denied', err);
     }
   };
 
@@ -60,7 +60,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
       mediaRecorder.current.stop();
       setIsRecording(false);
       if (timerRef.current) clearInterval(timerRef.current);
-      mediaRecorder.current.stream.getTracks().forEach(track => track.stop());
+      if (autoStopRef.current) clearTimeout(autoStopRef.current);
     }
   };
 
@@ -83,6 +83,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      if (autoStopRef.current) clearTimeout(autoStopRef.current);
     };
   }, []);
 
@@ -139,7 +140,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
         </div>
 
         {isRecording && (
-          <div className="flex flex-col items-center space-y-2">
+          <div className="flex flex-col items-center space-y-2 w-full">
             <div className="flex space-x-1">
               {[1, 2, 3, 4, 5].map(i => (
                 <motion.div
@@ -151,8 +152,16 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onRecord, sentence }) => 
               ))}
             </div>
             <span className="text-accent font-mono font-bold tracking-tighter">
-              00:{duration.toString().padStart(2, '0')}
+              00:{duration.toString().padStart(2, '0')} / 00:0{MAX_DURATION}
             </span>
+            {/* Progress bar */}
+            <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+              <motion.div
+                className="h-full bg-accent rounded-full"
+                style={{ width: `${(duration / MAX_DURATION) * 100}%` }}
+                transition={{ duration: 0.5 }}
+              />
+            </div>
           </div>
         )}
 

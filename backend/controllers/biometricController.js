@@ -199,7 +199,7 @@ const registerUserVoice = async (req, res, next) => {
     }
 
     // Convert base64 to buffer (strip data URI prefix if present)
-    const base64Data = voiceAudio.replace(/^data:audio\/[\w;]+,/, '');
+    const base64Data = voiceAudio.replace(/^data:audio\/[^;]+;*(?:codecs=[^;]+;)?base64,/, '');
     const audioBuffer = Buffer.from(base64Data, 'base64');
 
     // Prepare Cloudinary-compatible base64 string
@@ -274,7 +274,8 @@ const verifyUserVoice = async (req, res, next) => {
       });
     }
 
-    const audioBuffer = Buffer.from(voiceAudio.replace(/^data:audio\/\w+;base64,/, ''), 'base64');
+    const base64Data = voiceAudio.replace(/^data:audio\/[^;]+;*(?:codecs=[^;]+;)?base64,/, '');
+    const audioBuffer = Buffer.from(base64Data, 'base64');
 
     try {
       const verificationResult = await verifyVoice(targetUserId.toString(), audioBuffer, expectedText);

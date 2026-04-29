@@ -126,21 +126,31 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
                     rafRef.current = requestAnimationFrame(drawLoop); return;
                 }
             } else {
+                // When multiple faces are on screen, tighten the proximity bucket
+                // so close-together faces don't get their smoothed boxes swapped
+                const proximityPx = targetBoxes.length > 1 ? 40 : 80;
                 const next = targetBoxes.map(t => {
                     const tcx = t.x + t.w / 2;
                     const tcy = t.y + t.h / 2;
-                    const best = smoothedBoxesRef.current.find(s => {
+                    // Among all smoothed entries, find the CLOSEST one within bucket
+                    let bestMatch: typeof smoothedBoxesRef.current[0] | undefined;
+                    let bestDist = Infinity;
+                    for (const s of smoothedBoxesRef.current) {
                         const dx = Math.abs(s.sx + s.sw / 2 - tcx);
                         const dy = Math.abs(s.sy + s.sh / 2 - tcy);
-                        return dx < 80 && dy < 80;
-                    });
-                    if (best) {
+                        const dist = dx + dy;
+                        if (dx < proximityPx && dy < proximityPx && dist < bestDist) {
+                            bestDist = dist;
+                            bestMatch = s;
+                        }
+                    }
+                    if (bestMatch) {
                         return {
                             ...t,
-                            sx: best.sx + α * (t.x - best.sx),
-                            sy: best.sy + α * (t.y - best.sy),
-                            sw: best.sw + α * (t.w - best.sw),
-                            sh: best.sh + α * (t.h - best.sh),
+                            sx: bestMatch.sx + α * (t.x - bestMatch.sx),
+                            sy: bestMatch.sy + α * (t.y - bestMatch.sy),
+                            sw: bestMatch.sw + α * (t.w - bestMatch.sw),
+                            sh: bestMatch.sh + α * (t.h - bestMatch.sh),
                         };
                     }
                     return { ...t, sx: t.x, sy: t.y, sw: t.w, sh: t.h };

@@ -47,10 +47,12 @@ export default function TeacherProfilePage() {
 
     // Voice registration state
     const [isRecording, setIsRecording] = useState(false);
-    const [audioBase64, setAudioBase64] = useState<string | null>(null);
     const [audioDuration, setAudioDuration] = useState(0);
-    const [audioUrl, setAudioUrl] = useState<string | null>(null);
     const [registeringVoice, setRegisteringVoice] = useState(false);
+    
+    // Batch recording state
+    const [recordedSamples, setRecordedSamples] = useState<{base64: string, duration: number}[]>([]);
+    const REQUIRED_SAMPLES = 3;
 
     // Password change state
     const [currentPwd, setCurrentPwd] = useState('');
@@ -64,10 +66,9 @@ export default function TeacherProfilePage() {
 
     // Voice verification sentence
     const voicePhrases = [
-        // "Cloud Attendance System initializing my voice print.",
-        // "My voice is my password for the attendance portal.",
-        // "Authenticating teacher biometrics securely now.",
-        "I want to mark my attendance through my voice."
+        "I want to mark my attendance through my voice.",
+        "My voice is my secure password.",
+        "Cloud attendance system initializing now."
     ];
     const [currentPhrase, setCurrentPhrase] = useState(voicePhrases[0]);
 
@@ -99,20 +100,30 @@ export default function TeacherProfilePage() {
     const retakePhoto = () => { setCapturedImage(null); setCameraError(false); };
 
     // ── Voice helpers ──
-    const resetVoice = () => { setAudioUrl(null); setAudioBase64(null); setAudioDuration(0); setIsRecording(false); };
+    const resetVoice = () => { 
+        setRecordedSamples([]);
+        setAudioDuration(0); 
+        setIsRecording(false); 
+        setCurrentPhrase(voicePhrases[0]);
+    };
 
     const startRecording = async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const mr = new MediaRecorder(stream);
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+            const mr = new MediaRecorder(stream, { mimeType });
             audioChunks.current = [];
             mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data); };
             mr.onstop = async () => {
-                const blob = new Blob(audioChunks.current, { type: 'audio/wav' });
-                setAudioUrl(URL.createObjectURL(blob));
+                const blob = new Blob(audioChunks.current, { type: mimeType });
                 const reader = new FileReader();
                 reader.readAsDataURL(blob);
-                reader.onloadend = () => setAudioBase64(reader.result as string);
+                reader.onloadend = () => {
+                    setRecordedSamples(prev => [...prev, {
+                        base64: reader.result as string,
+                        duration: audioDuration
+                    }]);
+                };
                 stream.getTracks().forEach(t => t.stop());
             };
             mr.start();
@@ -120,7 +131,6 @@ export default function TeacherProfilePage() {
             setIsRecording(true);
             setAudioDuration(0);
             timerRef.current = setInterval(() => setAudioDuration(p => p + 1), 1000);
-            setCurrentPhrase(voicePhrases[Math.floor(Math.random() * voicePhrases.length)]);
         } catch {
             toast.error('Microphone access denied');
         }
@@ -130,6 +140,8 @@ export default function TeacherProfilePage() {
         mediaRecorderRef.current?.stop();
         setIsRecording(false);
         if (timerRef.current) clearInterval(timerRef.current);
+        // Cycle to next phrase
+        setCurrentPhrase(voicePhrases[recordedSamples.length % voicePhrases.length]);
     };
 
     useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
@@ -176,13 +188,16 @@ export default function TeacherProfilePage() {
     };
 
     const handleRegisterVoice = async () => {
-        if (!audioBase64) { toast.error('Please record a voice sample first'); return; }
-        if (audioDuration < 2) { toast.error('Recording too short! Please speak the phrase clearly for at least 2 seconds.'); return; }
+        if (recordedSamples.length < REQUIRED_SAMPLES) { 
+            toast.error(`Please record all ${REQUIRED_SAMPLES} samples.`); 
+            return; 
+        }
+        
         setRegisteringVoice(true);
         try {
             const res = await fetchWithAuth('/teacher-attendance/register-voice', {
                 method: 'POST',
-                body: JSON.stringify({ voiceAudio: audioBase64 }),
+                body: JSON.stringify({ voiceAudios: recordedSamples.map(s => s.base64) }),
             });
             if (res.success) {
                 toast.success('🎤 Voice registered successfully!');
@@ -509,15 +524,17 @@ export default function TeacherProfilePage() {
                                     {/* Recording card */}
                                     <div className="rounded-3xl bg-white/3 border border-white/8 p-8 flex flex-col items-center gap-6">
                                         <Sparkles className="w-6 h-6 text-purple-400 mb-1" />
-                                        <p className="text-sm text-white/40 text-center">To securely capture your vocal frequencies, please read the phrase below:<br />Minimum 3 seconds recommended.</p>
+                                        <p className="text-sm text-white/40 text-center">To securely capture your vocal frequencies, please read the phrase below:<br />Minimum 3 seconds recommended. ({recordedSamples.length}/{REQUIRED_SAMPLES} recorded)</p>
 
-                                        <div className="bg-purple-500/10 border border-purple-500/20 px-6 py-4 rounded-2xl max-w-sm text-center">
-                                            <p className="font-mono text-purple-200 font-bold text-lg leading-relaxed">
-                                                "{currentPhrase}"
-                                            </p>
-                                        </div>
+                                        {recordedSamples.length < REQUIRED_SAMPLES && (
+                                            <div className="bg-purple-500/10 border border-purple-500/20 px-6 py-4 rounded-2xl max-w-sm text-center">
+                                                <p className="font-mono text-purple-200 font-bold text-lg leading-relaxed">
+                                                    "{currentPhrase}"
+                                                </p>
+                                            </div>
+                                        )}
 
-                                        {!audioBase64 ? (
+                                        {recordedSamples.length < REQUIRED_SAMPLES ? (
                                             <div className="flex flex-col items-center gap-4">
                                                 <div className="relative">
                                                     <div className={`w-28 h-28 rounded-full flex items-center justify-center transition-all duration-500 ${isRecording ? 'bg-purple-500/20 ring-4 ring-purple-500/20' : 'bg-white/5 border-2 border-white/10'}`}>
@@ -562,29 +579,38 @@ export default function TeacherProfilePage() {
                                                         <p className="text-xs text-white/30">Recording… tap ■ to stop</p>
                                                     </div>
                                                 ) : (
-                                                    <p className="text-sm text-white/40">Tap the microphone to start recording</p>
+                                                    <p className="text-sm text-white/40">Tap the microphone to record sample {recordedSamples.length + 1}</p>
                                                 )}
                                             </div>
                                         ) : (
                                             <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="w-full space-y-4">
                                                 <div className="flex items-center gap-3 px-4 py-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
-                                                    <Volume2 className="w-5 h-5 text-emerald-400" />
+                                                    <CheckCircle2 className="w-5 h-5 text-emerald-400" />
                                                     <div>
-                                                        <p className="text-sm font-bold text-emerald-400">Voice Captured</p>
-                                                        <p className="text-xs text-white/40">{audioDuration}s · Ready to register</p>
+                                                        <p className="text-sm font-bold text-emerald-400">All Samples Captured</p>
+                                                        <p className="text-xs text-white/40">{recordedSamples.length} recordings · Ready to register</p>
                                                     </div>
                                                     <button onClick={resetVoice} className="ml-auto flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-white/40 transition-all">
                                                         <RefreshCw className="w-3 h-3" /> Redo
                                                     </button>
                                                 </div>
-                                                {audioUrl && (
-                                                    <audio controls src={audioUrl} className="w-full rounded-xl opacity-60" />
-                                                )}
                                             </motion.div>
+                                        )}
+                                        
+                                        {/* Display recorded samples */}
+                                        {recordedSamples.length > 0 && (
+                                            <div className="w-full flex gap-2 justify-center mt-2">
+                                                {recordedSamples.map((sample, idx) => (
+                                                    <div key={idx} className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-purple-500/10 border border-purple-500/20">
+                                                        <Volume2 className="w-3 h-3 text-purple-400" />
+                                                        <span className="text-xs font-bold text-purple-300">Sample {idx + 1} ({sample.duration}s)</span>
+                                                    </div>
+                                                ))}
+                                            </div>
                                         )}
                                     </div>
 
-                                    {audioBase64 && (
+                                    {recordedSamples.length === REQUIRED_SAMPLES && (
                                         <button
                                             onClick={handleRegisterVoice}
                                             disabled={registeringVoice}

@@ -1,29 +1,32 @@
-# Voice Recognition Service - Complete Production Code
-# voice_service/app.py
+# Voice Recognition Service
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
-from resemblyzer import VoiceEncoder, preprocess_wav
-import numpy as np
-import librosa
-import soundfile as sf
+import asyncio
+import concurrent.futures
 import io
-import cloudinary
-import cloudinary.uploader
-from motor.motor_asyncio import AsyncIOMotorClient
-from bson import ObjectId
+import json
 import os
 import time
-from pydub import AudioSegment
-from sklearn.metrics.pairwise import cosine_similarity
-from typing import List, Optional
-import speech_recognition as sr
 from pathlib import Path
+from typing import List, Optional
 
-# ── Load .env (backend/.env relative to this file's location) ──
+import cloudinary
+import cloudinary.uploader
+import librosa
+import numpy as np
+import soundfile as sf
+import speech_recognition as sr
+from bson import ObjectId
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydub import AudioSegment
+from resemblyzer import VoiceEncoder, preprocess_wav
+from sklearn.metrics.pairwise import cosine_similarity
+
+# ── Load .env ──
 try:
     from dotenv import load_dotenv
     env_path = Path(__file__).parent / 'backend' / '.env'
@@ -43,7 +46,6 @@ except ImportError:
 
 app = FastAPI(title="Voice Recognition Service")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,114 +54,90 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cloudinary config
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
     api_key=os.getenv('CLOUDINARY_API_KEY'),
     api_secret=os.getenv('CLOUDINARY_API_SECRET')
 )
 
-# MongoDB connection
 mongo_client = AsyncIOMotorClient(os.getenv('MONGODB_URI'))
 db = mongo_client.attendance
 
-# Initialize voice encoder
+# Initialize voice encoder at startup (blocking, but only once)
 encoder = VoiceEncoder()
+print("✅ Resemblyzer VoiceEncoder loaded")
+
+# ── Thread pool for blocking ML/audio calls ──
+# Keeps FastAPI's async event loop unblocked during heavy CPU work
+_voice_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="voice_ml"
+)
+
 
 # ==================== AUDIO PREPROCESSING ====================
 
-def preprocess_audio(audio_bytes):
+def preprocess_audio(audio_bytes: bytes) -> np.ndarray:
     """
-    Preprocess audio for voice recognition
+    Convert raw audio bytes → mono 16kHz float32 numpy array.
+    Handles any format pydub supports (webm, wav, ogg, mp4, etc.)
+    Returns the wav array ready for Resemblyzer.
     """
-    # Convert to AudioSegment
     audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-    
-    # Convert to mono if stereo
     if audio.channels > 1:
         audio = audio.set_channels(1)
-    
-    # Set sample rate to 16kHz (standard for speech)
-    audio = audio.set_frame_rate(16000)
-    
-    # Normalize audio
-    audio = audio.normalize()
-    
-    # Export as WAV
+    audio = audio.set_frame_rate(16000).normalize()
+
     wav_io = io.BytesIO()
     audio.export(wav_io, format='wav')
     wav_io.seek(0)
-    
-    # Load with librosa
-    wav, sr = librosa.load(wav_io, sr=16000)
-    
+
+    wav, _ = librosa.load(wav_io, sr=16000)
     return wav
 
-def detect_voice_liveness(audio_bytes):
-    """
-    Detect if audio is from live person or recording/TTS
-    Returns: (is_live: bool, confidence: float, reason: str)
-    """
-    if not audio_bytes or len(audio_bytes) < 1000:
-        return False, 0.0, "Audio recording is empty or corrupted"
 
-    try:
-        wav = preprocess_audio(audio_bytes)
-    except Exception as e:
-        return False, 0.0, f"Failed to process audio format: {str(e)}"
-    
-    # 1. Check duration (too short = suspicious)
+def _check_liveness(wav: np.ndarray) -> tuple[bool, float, str]:
+    """
+    Given a preprocessed wav array, check liveness heuristics.
+    Returns (is_live, confidence, reason).
+    Does NOT do any I/O or network calls.
+    """
     duration = len(wav) / 16000
+
     if duration < 1.0:
         return False, 0.3, "Audio too short (minimum 1 second)"
-    
     if duration > 10.0:
         return False, 0.3, "Audio too long (maximum 10 seconds)"
-    
-    # 2. Check for background noise (real recordings have some noise)
-    # Use standard deviation of the whole clip rather than just first 100ms (as digital silence from noise gates could trigger a false positive).
-    noise_level = np.std(wav)
-    
-    if noise_level < 0.001:  # Reduced back, as digital playback or extreme noise-cancellation can create silence
+
+    # Background noise check (synthetic/playback audio is often digitally silent)
+    if np.std(wav) < 0.001:
         return False, 0.4, "Audio too clean (possible synthetic or playback detected)"
-    
-    # 3. Check spectral characteristics
-    spectral_centroid = librosa.feature.spectral_centroid(y=wav, sr=16000)
-    mean_centroid = np.mean(spectral_centroid)
-    
+
+    # Spectral centroid
+    centroid = librosa.feature.spectral_centroid(y=wav, sr=16000)
+    mean_centroid = float(np.mean(centroid))
     if mean_centroid < 80 or mean_centroid > 6000:
-        return False, 0.5, f"Unusual frequency characteristics (Mean centroid: {mean_centroid:.2f})"
-        
-    # 3.5 Check for High-Frequency Compression (The "Phone Speaker" test)
-    # Phone speakers and compressed recordings aggressively cut off high frequencies.
-    # A real human voice in a room has more high-frequency energy (air/breath).
-    # We check the 85th percentile spectral rolloff.
+        return False, 0.5, f"Unusual frequency characteristics (centroid: {mean_centroid:.0f}Hz)"
+
+    # Spectral rolloff — catches heavily compressed/phone-speaker audio
     rolloff = librosa.feature.spectral_rolloff(y=wav, sr=16000, roll_percent=0.85)
-    mean_rolloff = np.mean(rolloff)
-    
-    if mean_rolloff < 2000:  # If 85% of the energy is below 2000Hz, it's heavily muffled/compressed
-        return False, 0.5, f"Audio heavily compressed/muffled (Rolloff: {mean_rolloff:.2f}Hz) - Possible playback"
-    
-    # 4. Check for pitch variations
-    pitches, magnitudes = librosa.piptrack(y=wav, sr=16000)
-    pitch_variation = np.std(pitches[pitches > 0])
-    
-    # DEBUG: Log the metrics to a file so we can see the exact difference between live and phone playback
-    import json
-    with open("liveness_metrics.log", "a") as f:
-        metrics = {
-            "duration": float(duration),
-            "noise_level": float(noise_level),
-            "mean_centroid": float(mean_centroid),
-            "mean_rolloff": float(mean_rolloff),
-            "pitch_variation": float(pitch_variation)
-        }
-        f.write(json.dumps(metrics) + "\n")
-    
-    if pitch_variation < 8: # Reduced to 8 as short phrases like 'I am present' might not have much natural variation
-        return False, 0.5, f"Unnatural pitch stability (Variation: {pitch_variation:.2f})"
-    
+    mean_rolloff = float(np.mean(rolloff))
+    if mean_rolloff < 2000:
+        return False, 0.5, f"Audio heavily compressed/muffled (rolloff: {mean_rolloff:.0f}Hz)"
+
+    # Pitch variation — TTS/recordings tend to be unnaturally stable
+    pitches, _ = librosa.piptrack(y=wav, sr=16000)
+    pitch_variation = float(np.std(pitches[pitches > 0]))
+    if pitch_variation < 8:
+        return False, 0.5, f"Unnatural pitch stability (variation: {pitch_variation:.2f})"
+
     return True, 0.85, "Live voice detected"
+
+
+def _build_embedding(wav: np.ndarray) -> np.ndarray:
+    """Run Resemblyzer embedding (CPU-heavy). Called in thread pool."""
+    wav_preprocessed = preprocess_wav(wav)
+    return encoder.embed_utterance(wav_preprocessed)
+
 
 # ==================== VOICE REGISTRATION ====================
 
@@ -169,51 +147,46 @@ async def register_voice(
     file: UploadFile = File(...)
 ):
     """
-    Register a user's voice by creating and storing voice embedding
+    Register a user's voice by creating and storing a voice embedding.
     """
     try:
-        # Read audio file
         audio_bytes = await file.read()
-        
-        # Liveness detection
-        is_live, confidence, reason = detect_voice_liveness(audio_bytes)
+        if not audio_bytes or len(audio_bytes) < 1000:
+            raise HTTPException(status_code=400, detail="Audio file is empty or too small")
+
+        loop = asyncio.get_running_loop()
+
+        # 1. Preprocess once, run in thread
+        wav = await loop.run_in_executor(_voice_executor, preprocess_audio, audio_bytes)
+
+        # 2. Liveness check (fast, no I/O)
+        is_live, confidence, reason = _check_liveness(wav)
         if not is_live:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Voice liveness check failed: {reason}"
+            raise HTTPException(status_code=400, detail=f"Voice liveness check failed: {reason}")
+
+        # 3. Generate embedding in thread pool (blocking CPU call)
+        embedding = await loop.run_in_executor(_voice_executor, _build_embedding, wav)
+
+        # 4. Upload audio to Cloudinary (network I/O — run in thread)
+        def _upload():
+            return cloudinary.uploader.upload(
+                audio_bytes,
+                folder="attendance/voices",
+                public_id=f"voice_{user_id}_{int(time.time())}",
+                resource_type="video"
             )
-        
-        # Preprocess audio
-        wav = preprocess_audio(audio_bytes)
-        
-        # Preprocess for Resemblyzer
-        wav_preprocessed = preprocess_wav(wav)
-        
-        # Generate voice embedding (256-dimensional vector)
-        embedding = encoder.embed_utterance(wav_preprocessed)
-        
-        # Upload audio to Cloudinary
-        upload_result = cloudinary.uploader.upload(
-            audio_bytes,
-            folder="attendance/voices",
-            public_id=f"voice_{user_id}_{int(time.time())}",
-            resource_type="video"  # Cloudinary treats audio as video
-        )
-        
-        # Store embedding in MongoDB
-        embedding_bytes = embedding.tobytes()
-        
+        upload_result = await loop.run_in_executor(_voice_executor, _upload)
+
+        # 5. Persist embedding to MongoDB
         await db.users.update_one(
             {"_id": ObjectId(user_id)},
-            {
-                "$set": {
-                    "voiceEmbedding": embedding_bytes,
-                    "voiceAudioUrl": upload_result['secure_url'],
-                    "voiceRegisteredAt": time.time()
-                }
-            }
+            {"$set": {
+                "voiceEmbedding": embedding.tobytes(),
+                "voiceAudioUrl": upload_result['secure_url'],
+                "voiceRegisteredAt": time.time()
+            }}
         )
-        
+
         return {
             "success": True,
             "message": "Voice registered successfully",
@@ -221,11 +194,12 @@ async def register_voice(
             "livenessConfidence": confidence,
             "duration": len(wav) / 16000
         }
-        
-    except HTTPException as he:
-        raise he
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 
 # ==================== VOICE VERIFICATION ====================
 
@@ -236,113 +210,89 @@ async def verify_voice(
     expected_text: Optional[str] = Form(None)
 ):
     """
-    Verify if uploaded voice matches registered voice AND optionally matches expected text
+    Verify if uploaded voice matches registered voice and optionally matches expected text.
+    Order: preprocess → liveness → STT → speaker match
     """
     try:
-        # Read audio file
         audio_bytes = await file.read()
-        
-        # 0. Speech-to-Text (STT) Check for dynamic sentence verification
-        recognized_text = ""
-        text_match = True
-        if expected_text:
-            recognizer = sr.Recognizer()
-            # Convert bytes to AudioFile
-            audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
-            wav_io = io.BytesIO()
-            audio_segment.export(wav_io, format="wav")
-            wav_io.seek(0)
-            
-            with sr.AudioFile(wav_io) as source:
-                audio_data = recognizer.record(source)
-                try:
-                    recognized_text = recognizer.recognize_google(audio_data)
-                    # Remove EVERYTHING except letters and numbers (spaces and punctuation gone)
-                    clean_expected = "".join(c for c in expected_text if c.isalnum()).lower()
-                    clean_recognized = "".join(c for c in recognized_text if c.isalnum()).lower()
-                    
-                    # Check if expected text is in recognized text 
-                    text_match = clean_expected in clean_recognized
-                except Exception as stt_error:
-                    print(f"STT Error: {stt_error}")
-                    text_match = False
-                    recognized_text = "[Error recognizing speech]"
+        if not audio_bytes or len(audio_bytes) < 1000:
+            raise HTTPException(status_code=400, detail="Audio file is empty or too small")
 
-        # 1. Liveness detection
-        is_live, liveness_confidence, reason = detect_voice_liveness(audio_bytes)
+        loop = asyncio.get_running_loop()
+
+        # 1. Preprocess ONCE — reused for liveness, STT, and embedding
+        wav = await loop.run_in_executor(_voice_executor, preprocess_audio, audio_bytes)
+
+        # 2. Liveness check first (no network cost) — reject bad audio early
+        is_live, liveness_confidence, reason = _check_liveness(wav)
         if not is_live:
-            return {
-                "verified": False,
-                "confidence": 0,
-                "reason": f"Voice liveness check failed: {reason}"
-            }
-        
-        if expected_text and not text_match:
-            return {
-                "verified": False,
-                "confidence": 0,
-                "reason": f"Sentence mismatch. Expected: '{expected_text}', heard: '{recognized_text}'",
-                "recognizedText": recognized_text
-            }
-        
-        # Get user's stored embedding
+            return {"verified": False, "confidence": 0, "reason": f"Liveness check failed: {reason}"}
+
+        # 3. STT check — only if expected_text provided (costs a Google API call)
+        recognized_text = ""
+        if expected_text:
+            def _run_stt():
+                recognizer = sr.Recognizer()
+                wav_io = io.BytesIO()
+                AudioSegment(
+                    (wav * 32767).astype(np.int16).tobytes(),
+                    frame_rate=16000, sample_width=2, channels=1
+                ).export(wav_io, format='wav')
+                wav_io.seek(0)
+                with sr.AudioFile(wav_io) as source:
+                    audio_data = recognizer.record(source)
+                try:
+                    return recognizer.recognize_google(audio_data)
+                except Exception:
+                    return ""
+
+            recognized_text = await loop.run_in_executor(_voice_executor, _run_stt)
+
+            clean_expected   = "".join(c for c in expected_text   if c.isalnum()).lower()
+            clean_recognized = "".join(c for c in recognized_text if c.isalnum()).lower()
+            if clean_expected and clean_expected not in clean_recognized:
+                return {
+                    "verified": False,
+                    "confidence": 0,
+                    "reason": f"Sentence mismatch. Expected: '{expected_text}', heard: '{recognized_text}'",
+                    "recognizedText": recognized_text
+                }
+
+        # 4. Fetch stored embedding from DB
         user = await db.users.find_one({"_id": ObjectId(user_id)})
-        
         if not user or not user.get('voiceEmbedding'):
             raise HTTPException(status_code=404, detail="User voice not registered")
-        
-        # Convert stored embedding back to numpy array
+
         stored_embedding = np.frombuffer(user['voiceEmbedding'], dtype=np.float32)
-        
-        # Preprocess uploaded audio
-        wav = preprocess_audio(audio_bytes)
-        wav_preprocessed = preprocess_wav(wav)
-        
-        # Generate embedding for uploaded audio
-        current_embedding = encoder.embed_utterance(wav_preprocessed)
-        
-        # Calculate cosine similarity
-        similarity = cosine_similarity(
-            [current_embedding],
-            [stored_embedding]
-        )[0][0]
-        # Convert to confidence (0-1)
+
+        # 5. Generate current embedding (CPU-heavy) in thread pool
+        current_embedding = await loop.run_in_executor(_voice_executor, _build_embedding, wav)
+
+        # 6. Cosine similarity
+        similarity = float(cosine_similarity([current_embedding], [stored_embedding])[0][0])
         confidence = (similarity + 1) / 2
-        
-        # Threshold for verification
-        # Resemblyzer embeddings of different humans still share baseline similarity (~0.5 - 0.7)
-        # So a threshold of 0.75 (which is similarity 0.5) is far too low.
-        VERIFICATION_THRESHOLD = 0.85
-        
+
+        # Resemblyzer baseline similarity is high (0.6-0.75 for same gender).
+        # We need a strict threshold. User reported getting ~0.89 while brother gets 0.88.
+        VERIFICATION_THRESHOLD = 0.885
         is_match = confidence > VERIFICATION_THRESHOLD
-        
-        with open("liveness_metrics.log", "a") as f:
-            f.write(f"Speaker Match Debug - Similarity: {similarity:.3f}, Confidence: {confidence:.3f}, Match: {is_match}\n")
-        
-        if not is_match:
-            return {
-                "verified": False,
-                "confidence": float(confidence),
-                "reason": f"Speaker Voice Match failed (Confidence {confidence:.2f} < {VERIFICATION_THRESHOLD}) - Not the registered user."
-            }
-        
-        # Upload verification audio to Cloudinary (temporary)
-        else:
-            verification_audio_url = None
-        
+
         return {
             "verified": bool(is_match),
             "confidence": float(confidence),
             "similarity": float(similarity),
             "livenessConfidence": liveness_confidence,
-            "verificationAudioUrl": verification_audio_url,
-            "reason": "Voice matched" if is_match else "Voice did not match"
+            "recognizedText": recognized_text,
+            "reason": "Voice matched" if is_match else (
+                f"Speaker match failed (confidence {confidence:.2f} < {VERIFICATION_THRESHOLD})"
+            )
         }
-        
-    except HTTPException as he:
-        raise he
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 
 # ==================== BATCH VOICE REGISTRATION ====================
 
@@ -352,80 +302,79 @@ async def batch_register_voice(
     files: List[UploadFile] = File(...)
 ):
     """
-    Register multiple voice samples for better accuracy
-    Recommended: 5-10 samples with different phrases
+    Register multiple voice samples (3–15) for better accuracy.
+    Averages embeddings across all samples.
     """
     try:
         if len(files) < 3:
             raise HTTPException(status_code=400, detail="Please upload at least 3 voice samples")
-        
         if len(files) > 15:
             raise HTTPException(status_code=400, detail="Maximum 15 samples allowed")
-        
+
+        loop = asyncio.get_running_loop()
         all_embeddings = []
         uploaded_urls = []
-        
+
         for idx, file in enumerate(files):
-            # Read audio
             audio_bytes = await file.read()
-            
-            # Preprocess
-            wav = preprocess_audio(audio_bytes)
-            wav_preprocessed = preprocess_wav(wav)
-            
-            # Generate embedding
-            embedding = encoder.embed_utterance(wav_preprocessed)
+            if not audio_bytes or len(audio_bytes) < 1000:
+                continue
+
+            # Preprocess + liveness check each sample
+            wav = await loop.run_in_executor(_voice_executor, preprocess_audio, audio_bytes)
+            is_live, _, _ = _check_liveness(wav)
+            if not is_live:
+                continue  # skip bad samples silently
+
+            embedding = await loop.run_in_executor(_voice_executor, _build_embedding, wav)
             all_embeddings.append(embedding)
-            
-            # Upload to Cloudinary
-            upload_result = cloudinary.uploader.upload(
-                audio_bytes,
-                folder=f"attendance/voices/{user_id}",
-                public_id=f"voice_{idx}_{int(time.time())}",
-                resource_type="video"
-            )
+
+            def _upload(ab=audio_bytes, i=idx):
+                return cloudinary.uploader.upload(
+                    ab,
+                    folder=f"attendance/voices/{user_id}",
+                    public_id=f"voice_{i}_{int(time.time())}",
+                    resource_type="video"
+                )
+            upload_result = await loop.run_in_executor(_voice_executor, _upload)
             uploaded_urls.append(upload_result['secure_url'])
-        
-        # Average all embeddings
+
+        if len(all_embeddings) < 2:
+            raise HTTPException(status_code=400, detail="Too few valid voice samples passed liveness check")
+
         avg_embedding = np.mean(all_embeddings, axis=0)
-        embedding_bytes = avg_embedding.tobytes()
-        
-        # Store in MongoDB
+
         await db.users.update_one(
             {"_id": ObjectId(user_id)},
-            {
-                "$set": {
-                    "voiceEmbedding": embedding_bytes,
-                    "voiceAudioUrl": uploaded_urls[0],
-                    "allVoiceAudios": uploaded_urls,
-                    "voiceRegisteredAt": time.time(),
-                    "embeddingCount": len(all_embeddings)
-                }
-            }
+            {"$set": {
+                "voiceEmbedding": avg_embedding.tobytes(),
+                "voiceAudioUrl": uploaded_urls[0] if uploaded_urls else "",
+                "allVoiceAudios": uploaded_urls,
+                "voiceRegisteredAt": time.time(),
+                "embeddingCount": len(all_embeddings)
+            }}
         )
-        
+
         return {
             "success": True,
             "message": f"Registered {len(all_embeddings)} voice embeddings",
             "samplesProcessed": len(all_embeddings),
             "audioUrls": uploaded_urls
         }
-        
-    except HTTPException as he:
-        raise he
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 
 # ==================== HEALTH CHECK ====================
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "OK",
-        "service": "Voice Recognition",
-        "timestamp": time.time()
-    }
+    return {"status": "OK", "service": "Voice Recognition", "timestamp": time.time()}
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8081)

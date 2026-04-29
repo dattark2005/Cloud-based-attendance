@@ -806,9 +806,35 @@ async def ws_live_detect(websocket: WebSocket):
                 if len(faces) == 0:
                     return []
 
-                # Score every face against every DB user
+                # ── IoU-based face separation ──
+                # When two detected face boxes overlap significantly, alignCrop for each
+                # will sample pixels from the other person → contaminated embeddings.
+                # Remove the lower-confidence duplicate when IoU > 0.25.
+                def _iou(a, b):
+                    ax, ay, aw, ah = float(a[0]), float(a[1]), float(a[2]), float(a[3])
+                    bx, by, bw, bh = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+                    ix = max(ax, bx);  iy = max(ay, by)
+                    iw = max(0.0, min(ax+aw, bx+bw) - ix)
+                    ih = max(0.0, min(ay+ah, by+bh) - iy)
+                    inter = iw * ih
+                    union = aw*ah + bw*bh - inter
+                    return inter / union if union > 0 else 0.0
+
+                # Sort by YuNet confidence desc (index 14), keep non-overlapping faces
+                sorted_faces = sorted(faces, key=lambda f: float(f[14]), reverse=True)
+                clean_faces = []
+                for cand in sorted_faces:
+                    if all(_iou(cand, kept) < 0.25 for kept in clean_faces):
+                        clean_faces.append(cand)
+
+                # If we have multiple close faces, tighten the margin gate
+                # to reduce cross-contamination misidentification risk
+                multi_face = len(clean_faces) > 1
+                effective_margin = WS_MIN_MARGIN * (1.8 if multi_face else 1.0)
+
+                # Score every clean face against every DB user
                 result_grid = []
-                for face in faces:
+                for face in clean_faces:
                     try:
                         aligned = face_recognizer.alignCrop(bgr, face)
                         cur_emb = face_recognizer.feature(aligned).flatten().astype(np.float64)
@@ -833,7 +859,8 @@ async def ws_live_detect(websocket: WebSocket):
 
                     if top_score < WS_COSINE_THRESHOLD:
                         continue
-                    if margin < WS_MIN_MARGIN and second_score > (WS_COSINE_THRESHOLD - 0.05):
+                    # Stricter margin when multiple faces are present
+                    if margin < effective_margin and second_score > (WS_COSINE_THRESHOLD - 0.05):
                         continue
 
                     uid = top_user["user_id"]
@@ -863,6 +890,7 @@ async def ws_live_detect(websocket: WebSocket):
                         "conf": round(float(matched_conf), 3),
                     })
                 return boxes
+
 
             loop = asyncio.get_running_loop()
             raw_boxes = await loop.run_in_executor(_ml_executor, process_frame)

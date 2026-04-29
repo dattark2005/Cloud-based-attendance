@@ -236,24 +236,25 @@ const registerFace = registerTeacherFace;
 const registerTeacherVoice = async (req, res, next) => {
     try {
         const teacherId = req.user._id;
-        const { voiceAudio } = req.body;
+        const { voiceAudios } = req.body;
 
-        if (!voiceAudio) {
-            return res.status(400).json({ success: false, message: 'Voice audio string is required' });
+        if (!voiceAudios || !Array.isArray(voiceAudios) || voiceAudios.length < 3) {
+            return res.status(400).json({ success: false, message: 'Please provide at least 3 voice samples for robust registration.' });
         }
-
-        // Remove the data:audio/webm;base64, prefix
-        const base64Data = voiceAudio.replace(/^data:audio\/\w+;base64,/, "");
-        const audioBuffer = Buffer.from(base64Data, 'base64');
 
         const formData = new FormData();
         formData.append('user_id', teacherId.toString());
-        formData.append('file', audioBuffer, {
-            filename: 'registration_audio.webm',
-            contentType: 'audio/webm'
+
+        voiceAudios.forEach((audioBase64Str, index) => {
+            const base64Data = audioBase64Str.replace(/^data:audio\/[^;]+;*(?:codecs=[^;]+;)?base64,/, "");
+            const audioBuffer = Buffer.from(base64Data, 'base64');
+            formData.append('files', audioBuffer, {
+                filename: `registration_audio_${index}.webm`,
+                contentType: 'audio/webm'
+            });
         });
 
-        const pythonRes = await axios.post(`${VOICE_SERVICE_URL}/register-voice`, formData, {
+        const pythonRes = await axios.post(`${VOICE_SERVICE_URL}/batch-register-voice`, formData, {
             headers: {
                 ...formData.getHeaders(),
             },
@@ -314,8 +315,8 @@ const markVoiceAttendance = async (req, res, next) => {
         const storedFloat32 = new Float32Array(teacher.voiceEmbedding.buffer, teacher.voiceEmbedding.byteOffset, teacher.voiceEmbedding.length / 4);
         const expectedEmbeddingStr = JSON.stringify(Array.from(storedFloat32));
 
-        // Format base64 back into buffer
-        const base64Data = voiceAudio.replace(/^data:audio\/\w+;base64,/, "");
+        // Remove data URI prefix properly
+        const base64Data = voiceAudio.replace(/^data:audio\/[^;]+;*(?:codecs=[^;]+;)?base64,/, "");
         const audioBuffer = Buffer.from(base64Data, 'base64');
 
         const formData = new FormData();
