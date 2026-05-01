@@ -288,20 +288,9 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
                             }, 500);
                         }
                     }
-
-                    const currentNames = new Set<string>(raw.filter(b => b.name && b.name !== 'Detecting...' && b.name !== 'Unknown').map(b => b.name));
-                    prevNamesRef.current.forEach(name => {
-                        if (!currentNames.has(name) && !leaveTimersRef.current.has(name)) {
-                            // Log only after 3 minutes of continuous absence (box disappears immediately)
-                            const t = setTimeout(() => { leaveTimersRef.current.delete(name); addActivityLog(`${name} left camera view`, 'LEAVE'); }, 180_000);
-                            leaveTimersRef.current.set(name, t);
-                        }
-                    });
-                    currentNames.forEach(name => {
-                        if (leaveTimersRef.current.has(name)) { clearTimeout(leaveTimersRef.current.get(name)!); leaveTimersRef.current.delete(name); }
-                        if (!prevNamesRef.current.has(name)) addActivityLog(`${name} entered camera view`, 'ENTER');
-                    });
-                    prevNamesRef.current = currentNames;
+                    // NOTE: Activity logs are driven by socket presence:update events (backend),
+                    // NOT by raw WebSocket face-detection boxes. This prevents "entered" spam
+                    // from box reconnections / detection noise.
                 } catch {}
             };
             ws.onclose = () => { clearInterval(interval); setTimeout(connect, 3000); };
@@ -353,8 +342,15 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
             setPresenceData(prev => {
                 const existing = prev.find(s => s.student._id.toString() === p.studentId.toString());
                 const prevStatus = existing?.currentStatus ?? null;
-                if (p.status === 'SEEN' && prevStatus !== 'SEEN') addActivityLog(`${p.studentName} entered the classroom`, 'ENTER');
-                else if (p.status === 'ABSENT' && prevStatus === 'SEEN') addActivityLog(`${p.studentName} left (absent)`, 'LEAVE');
+                // Only add activity log on ACTUAL status transitions tracked locally
+                // prevStatus = what we had before this event; p.status = what just arrived
+                // SEEN when prev was not SEEN → entered
+                // ABSENT when prev was SEEN   → left
+                if (p.status === 'SEEN' && prevStatus !== 'SEEN') {
+                    addActivityLog(`${p.studentName} entered the room`, 'ENTER');
+                } else if (p.status === 'ABSENT' && prevStatus === 'SEEN') {
+                    addActivityLog(`${p.studentName} left the room`, 'LEAVE');
+                }
                 const updated: PresenceStudent = {
                     student: existing?.student || { _id: p.studentId, fullName: p.studentName, prn: p.studentPrn },
                     currentStatus: p.status, lastSeen: p.status === 'SEEN' ? p.timestamp : (existing?.lastSeen || null),
@@ -371,34 +367,34 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
     }, [lectureId, sectionId, addActivityLog]);
 
     return (
-        <div className="relative glass-card p-6 rounded-[28px] space-y-5 overflow-hidden">
+        <div className="relative glass-card p-4 rounded-[28px] space-y-3 overflow-hidden">
             {/* Ambient glows */}
             <div className="absolute -top-12 -right-12 w-48 h-48 bg-cyan-500/10 rounded-full blur-[80px] pointer-events-none" />
             <div className="absolute -bottom-12 -left-12 w-48 h-48 bg-blue-500/10 rounded-full blur-[80px] pointer-events-none" />
 
             {/* ── Header ── */}
-            <div className="relative z-10 flex items-center gap-4">
-                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 flex items-center justify-center shrink-0">
+            <div className="relative z-10 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 flex items-center justify-center shrink-0">
                     {cameraActive
-                        ? <div className="relative"><div className="absolute w-8 h-8 bg-cyan-400/30 rounded-full animate-ping" /><Activity className="w-6 h-6 text-cyan-400 relative z-10" /></div>
-                        : <WifiOff className="w-6 h-6 text-white/40" />}
+                        ? <div className="relative"><div className="absolute w-6 h-6 bg-cyan-400/30 rounded-full animate-ping" /><Activity className="w-5 h-5 text-cyan-400 relative z-10" /></div>
+                        : <WifiOff className="w-5 h-5 text-white/40" />}
                 </div>
                 <div>
-                    <div className="flex items-center gap-3">
-                        <h2 className="text-2xl font-black tracking-tight text-white">Live Classroom</h2>
-                        <span className={`px-2.5 py-1 text-[9px] font-black uppercase tracking-widest rounded-full border ${cameraActive ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30 animate-pulse' : 'bg-white/5 text-white/30 border-white/10'}`}>
-                            {cameraActive ? 'Live Feed Active' : 'Waiting for camera'}
+                    <div className="flex items-center gap-2">
+                        <h2 className="text-lg font-black tracking-tight text-white">Live Classroom</h2>
+                        <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-full border ${cameraActive ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30 animate-pulse' : 'bg-white/5 text-white/30 border-white/10'}`}>
+                            {cameraActive ? 'Live' : 'Waiting'}
                         </span>
                     </div>
-                    <p className="text-sm text-white/50 font-medium mt-0.5">
+                    <p className="text-xs text-white/50 font-medium">
                         {activeSession?.courseId?.courseName} · Room {roomNumber || 'Unknown'}
-                        {modelsLoaded && <span className="ml-2 text-emerald-400/70 text-xs">· AI Ready</span>}
+                        {modelsLoaded && <span className="ml-2 text-emerald-400/70">· AI Ready</span>}
                     </p>
                 </div>
             </div>
 
             {/* ── Main content ── */}
-            <div className="relative z-10 space-y-4">
+            <div className="relative z-10 space-y-3">
                 {loading && (
                     <div className="py-12 flex flex-col items-center justify-center gap-3">
                         <Loader2 className="w-10 h-10 text-cyan-500 animate-spin" />
@@ -407,7 +403,7 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
                 )}
 
                 {/* ── Camera + Canvas ── */}
-                <div className={`relative w-full aspect-video rounded-2xl overflow-hidden border border-white/10 bg-black shadow-2xl ${loading ? 'hidden' : 'block'}`}>
+                <div className={`relative w-full rounded-2xl overflow-hidden border border-white/10 bg-black shadow-2xl ${loading ? 'hidden' : 'block'}`} style={{ aspectRatio: '16/9' }}>
                     <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }} onLoadedMetadata={() => setCameraActive(true)} />
                     <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
 
@@ -450,17 +446,17 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
 
                 {/* ── Stats + Students ── */}
                 <div className={`space-y-4 ${loading ? 'hidden' : 'block'}`}>
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-3 gap-2">
                         {[
                             { label: 'In Room', value: presenceStats?.present || 0, color: 'cyan' },
                             { label: 'Absent',  value: presenceStats?.absent  || 0, color: 'red' },
                             { label: 'Unseen',  value: presenceStats?.unseen  || 0, color: 'white' },
                         ].map(({ label, value, color }) => (
-                            <div key={label} className={`flex items-center gap-3 p-4 rounded-2xl ${color === 'cyan' ? 'bg-cyan-500/5 border border-cyan-500/10' : color === 'red' ? 'bg-red-500/5 border border-red-500/10' : 'bg-white/5 border border-white/5'}`}>
-                                <div className={`w-1.5 h-8 rounded-full ${color === 'cyan' ? 'bg-cyan-400' : color === 'red' ? 'bg-red-400' : 'bg-white/20'}`} />
+                            <div key={label} className={`flex items-center gap-2 p-3 rounded-xl ${color === 'cyan' ? 'bg-cyan-500/5 border border-cyan-500/10' : color === 'red' ? 'bg-red-500/5 border border-red-500/10' : 'bg-white/5 border border-white/5'}`}>
+                                <div className={`w-1 h-6 rounded-full ${color === 'cyan' ? 'bg-cyan-400' : color === 'red' ? 'bg-red-400' : 'bg-white/20'}`} />
                                 <div>
-                                    <p className="text-2xl font-black text-white">{value}</p>
-                                    <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">{label}</p>
+                                    <p className="text-xl font-black text-white">{value}</p>
+                                    <p className="text-[9px] font-bold text-white/40 uppercase tracking-widest">{label}</p>
                                 </div>
                             </div>
                         ))}
@@ -493,7 +489,7 @@ export default function LiveClassroomPreview({ activeSession }: LiveClassroomPre
             </div>
 
             {/* ── Activity Log ── */}
-            <div className="relative z-10 rounded-2xl bg-black/40 border border-white/10 overflow-hidden flex flex-col h-56">
+            <div className="relative z-10 rounded-2xl bg-black/40 border border-white/10 overflow-hidden flex flex-col h-40">
                 <div className="flex items-center gap-3 px-5 py-3 bg-white/5 border-b border-white/5">
                     <div className="w-7 h-7 rounded-full bg-blue-500/20 border border-blue-500/30 flex items-center justify-center">
                         <Users className="w-3.5 h-3.5 text-blue-400" />

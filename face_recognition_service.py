@@ -726,6 +726,53 @@ _ws_user_cache: list = []
 _ws_user_cache_ts: float = 0.0
 _ws_cache_refreshing: bool = False
 
+# ── Presence posting state (shared across all WS connections) ──
+_ws_presence_posted: dict = {}   # sid → (timestamp, status)
+_ws_last_seen: dict = {}         # sid → last_seen_timestamp
+_WS_PRESENCE_COOLDOWN = 5        # seconds between same-status posts per student
+_WS_ABSENT_THRESHOLD  = 60       # seconds missing → fire ABSENT
+_BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3001")
+_DOOR_API_KEY = os.getenv("DOOR_CAMERA_API_KEY", "door-cam-secret-key-2026")
+
+import requests as _requests
+
+async def _post_presence_async(student_id: str, status: str, confidence: float = 0.0):
+    """Fire-and-forget HTTP POST to Node.js backend for SEEN/ABSENT events."""
+    def _do_post():
+        try:
+            resp = _requests.post(
+                f"{_BACKEND_URL}/api/door/presence",
+                json={"studentId": student_id, "status": status, "confidence": round(confidence, 3)},
+                headers={"Authorization": f"Bearer {_DOOR_API_KEY}"},
+                timeout=5,
+            )
+            icon = "🟢" if status == "SEEN" else "🔴"
+            logger.info(f"{icon} {status}: sid={student_id} conf={confidence:.2f} → {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Presence post failed: {e}")
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _do_post)
+
+
+async def _ws_absence_checker():
+    """Background task: fires ABSENT events for students missing >= 60s."""
+    while True:
+        await asyncio.sleep(10)
+        now = time.time()
+        for sid, last_t in list(_ws_last_seen.items()):
+            if now - last_t >= _WS_ABSENT_THRESHOLD:
+                last_posted_t, last_posted_s = _ws_presence_posted.get(sid, (0, None))
+                if last_posted_s != "ABSENT":
+                    _ws_presence_posted[sid] = (now, "ABSENT")
+                    logger.warning(f"ABSENT: {sid} missing {int(now - last_t)}s")
+                    asyncio.ensure_future(_post_presence_async(sid, "ABSENT", 0.0))
+
+
+@app.on_event("startup")
+async def _start_absence_checker():
+    asyncio.ensure_future(_ws_absence_checker())
+    logger.info("WS Absence checker started (threshold=60s)")
+
 
 @app.websocket("/ws/live-detect")
 async def ws_live_detect(websocket: WebSocket):
@@ -926,6 +973,31 @@ async def ws_live_detect(websocket: WebSocket):
                     sticky[key]["miss_count"] += 1
                     if sticky[key]["miss_count"] > STICKY_FRAMES * 2:
                         del sticky[key]
+
+            # ── 4. Post SEEN events for identified students ──
+            # Only post when a known student is detected (conf ≥ threshold).
+            # Per-student 5s cooldown to avoid hammering backend.
+            # The backend deduplicates at DB level (only logs on status change).
+            now_t = time.time()
+            for b in smoothed_boxes:
+                sname = b.get("name", "Unknown")
+                sconf = b.get("conf", 0.0)
+                if sname in ("Unknown", "Detecting...") or sconf < WS_COSINE_THRESHOLD:
+                    continue
+                # Find student ID from cache
+                sid = None
+                for u in frame_cache:
+                    if u["name"] == sname:
+                        sid = u["user_id"]
+                        break
+                if not sid:
+                    continue
+                # Per-student cooldown: only post every 5 seconds
+                last_t, last_s = _ws_presence_posted.get(sid, (0, None))
+                if last_s != "SEEN" or (now_t - last_t) >= _WS_PRESENCE_COOLDOWN:
+                    _ws_presence_posted[sid] = (now_t, "SEEN")
+                    _ws_last_seen[sid] = now_t
+                    asyncio.ensure_future(_post_presence_async(sid, "SEEN", sconf))
 
             await websocket.send_json({"boxes": smoothed_boxes})
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, use } from 'react';
+import React, { useState, useEffect, useCallback, useRef, use } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     ArrowLeft, XCircle, CheckCircle2,
@@ -14,7 +14,9 @@ import { toast } from 'react-hot-toast';
 import DashboardLayout from '@/components/DashboardLayout';
 import LiveClassroomPreview from '@/components/dashboard/LiveClassroomPreview';
 import TeacherAttendanceModal from '@/components/modals/TeacherAttendanceModal';
+import StudentLogDrawer from '@/components/modals/StudentLogDrawer';
 import { fetchWithAuth } from '@/lib/api';
+import { socketService } from '@/lib/socket';
 
 function formatDateTime(dateStr: string) {
     const d = new Date(dateStr);
@@ -57,6 +59,9 @@ export default function LectureDetailPage({
     // Manual edit
     const [updatingId, setUpdatingId] = useState<string | null>(null);
 
+    // Student log drawer
+    const [drawerStudent, setDrawerStudent] = useState<{ id: string; name: string } | null>(null);
+
     /* ─── Load data ─── */
     const loadLectureData = useCallback(async () => {
         try {
@@ -89,8 +94,71 @@ export default function LectureDetailPage({
     useEffect(() => {
         loadLectureData();
         checkTeacherAttendance();
-        // The LiveClassroomPreview component handles its own real-time presence/video updates via socket
     }, [loadLectureData, checkTeacherAttendance]);
+
+    /* ─── Real-time socket: update attendance list live ─── */
+    useEffect(() => {
+        const socket = socketService.connect();
+
+        // presence:update → fired when doorController gets a SEEN/ABSENT event
+        const onPresence = (data: any) => {
+            if (data.lectureId?.toString() !== lectureId) return;
+            const sid = data.studentId?.toString();
+            if (!sid) return;
+
+            if (data.status === 'SEEN') {
+                // Upsert: add a synthetic PRESENT record to local state
+                setAttendanceRecords(prev => {
+                    const exists = prev.some(
+                        (r: any) => (r.studentId?._id?.toString() || r.studentId?.toString()) === sid
+                    );
+                    if (exists) {
+                        // Update existing record to PRESENT
+                        return prev.map((r: any) => {
+                            const rid = r.studentId?._id?.toString() || r.studentId?.toString();
+                            if (rid === sid) return { ...r, status: 'PRESENT', currentlyPresent: true };
+                            return r;
+                        });
+                    }
+                    // Create minimal record so the student appears in presentStudents
+                    return [
+                        ...prev,
+                        {
+                            _id: `live_${sid}`,
+                            studentId: { _id: sid, fullName: data.studentName || '', email: data.studentPrn || '' },
+                            status: 'PRESENT',
+                            currentlyPresent: true,
+                            markedAt: data.timestamp || new Date().toISOString(),
+                        },
+                    ];
+                });
+            } else if (data.status === 'ABSENT') {
+                // When ABSENT, mark as ABSENT in local state (don't remove — preserve the record)
+                setAttendanceRecords(prev =>
+                    prev.map((r: any) => {
+                        const rid = r.studentId?._id?.toString() || r.studentId?.toString();
+                        if (rid === sid) return { ...r, currentlyPresent: false };
+                        return r;
+                    })
+                );
+            }
+        };
+
+        // attendance:updated → fired on manual override by teacher
+        const onAttendanceUpdated = (data: any) => {
+            if (data.lectureId?.toString() !== lectureId) return;
+            // Just re-fetch to get accurate state
+            loadLectureData();
+        };
+
+        socket.on('presence:update', onPresence);
+        socket.on('attendance:updated', onAttendanceUpdated);
+
+        return () => {
+            socket.off('presence:update', onPresence);
+            socket.off('attendance:updated', onAttendanceUpdated);
+        };
+    }, [lectureId, loadLectureData]);
 
     /* ─── Manual override ─── */
     const updateAttendance = async (studentId: string, status: 'PRESENT' | 'ABSENT') => {
@@ -141,7 +209,7 @@ export default function LectureDetailPage({
 
     return (
         <DashboardLayout>
-            <div className="space-y-8">
+            <div className="space-y-4">
 
                 {/* ── Back ── */}
                 <Link
@@ -156,7 +224,7 @@ export default function LectureDetailPage({
                 <motion.div
                     initial={{ opacity: 0, y: 16 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="glass-card p-8 rounded-[32px] border-white/8 space-y-4"
+                    className="glass-card p-5 rounded-[28px] border-white/8 space-y-3"
                 >
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         <div className="flex items-start gap-4">
@@ -274,18 +342,21 @@ export default function LectureDetailPage({
                     </motion.div>
                 )}
 
-                {/* ── Classroom Live Preview (only for active/scheduled) ── */}
-                {canTakePhoto && lecture && (
-                    <motion.div
-                        initial={{ opacity: 0, y: 16 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.15 }}
-                    >
-                        <LiveClassroomPreview activeSession={lecture} />
-                    </motion.div>
-                )}
+                {/* ── Two-column layout: Camera left, Students right ── */}
+                <div className="grid grid-cols-1 xl:grid-cols-[45%_55%] gap-4 items-start">
 
-                {/* ── Student Attendance List ── */}
+                    {/* LEFT — Live Camera (only for active/scheduled) */}
+                    {canTakePhoto && lecture && (
+                        <motion.div
+                            initial={{ opacity: 0, y: 16 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.15 }}
+                        >
+                            <LiveClassroomPreview activeSession={lecture} />
+                        </motion.div>
+                    )}
+
+                    {/* RIGHT — Student Attendance List */}
                 <motion.div
                     initial={{ opacity: 0, y: 16 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -345,7 +416,11 @@ export default function LectureDetailPage({
                                                             {student.fullName?.charAt(0).toUpperCase()}
                                                         </div>
                                                         <div className="min-w-0">
-                                                            <p className="text-sm font-bold truncate">{student.fullName}</p>
+                                                            <button
+                                                                onClick={() => setDrawerStudent({ id: student._id, name: student.fullName })}
+                                                                className="text-sm font-bold truncate hover:text-cyan-300 hover:underline transition-colors text-left"
+                                                                title="Click to view attendance log"
+                                                            >{student.fullName}</button>
                                                             <div className="flex items-center gap-3 mt-0.5">
                                                                 <p className="text-[11px] text-white/40 truncate">{student.prn || student.email}</p>
                                                                 {record && (
@@ -421,7 +496,11 @@ export default function LectureDetailPage({
                                                             {student.fullName?.charAt(0).toUpperCase()}
                                                         </div>
                                                         <div className="min-w-0">
-                                                            <p className="text-sm font-bold truncate">{student.fullName}</p>
+                                                            <button
+                                                                onClick={() => setDrawerStudent({ id: student._id, name: student.fullName })}
+                                                                className="text-sm font-bold truncate hover:text-cyan-300 hover:underline transition-colors text-left"
+                                                                title="Click to view attendance log"
+                                                            >{student.fullName}</button>
                                                             <p className="text-[11px] text-white/30 truncate">{student.prn || student.email}</p>
                                                         </div>
                                                     </div>
@@ -460,6 +539,8 @@ export default function LectureDetailPage({
                     )}
                 </motion.div>
 
+                </div>{/* end 2-col grid */}
+
             </div>
 
             <TeacherAttendanceModal
@@ -470,6 +551,15 @@ export default function LectureDetailPage({
                     setTeacherMarkedAt(new Date().toISOString());
                 }}
                 initialView={null}
+                lectureId={lectureId}
+            />
+
+            {/* Per-student attendance log drawer */}
+            <StudentLogDrawer
+                isOpen={!!drawerStudent}
+                onClose={() => setDrawerStudent(null)}
+                studentId={drawerStudent?.id ?? null}
+                studentName={drawerStudent?.name ?? ''}
                 lectureId={lectureId}
             />
         </DashboardLayout>

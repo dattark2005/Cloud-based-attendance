@@ -6,6 +6,7 @@ const {
     logDoorEvent,
     getPresenceStatus,
     getLectureLog,
+    getStudentLog,
     getMyLog,
     getActiveLectureStudents,
     logVideoFrame,
@@ -53,6 +54,9 @@ router.get('/presence/:lectureId', isTeacher, getPresenceStatus);
 
 // Teacher: full log (all events) for a lecture
 router.get('/lecture/:lectureId', isTeacher, getLectureLog);
+
+// Teacher: per-student entry/exit timeline for a lecture
+router.get('/lecture/:lectureId/student/:studentId', isTeacher, getStudentLog);
 
 // Student: own presence log for a lecture
 router.get('/my/:lectureId', getMyLog);

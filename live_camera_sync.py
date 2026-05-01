@@ -43,10 +43,10 @@ FACE_SVC_URL     = os.getenv('FACE_SERVICE_URL', 'http://localhost:8082')
 API_KEY          = os.getenv('DOOR_CAMERA_API_KEY', 'door-cam-secret-key-2026')
 
 SCAN_INTERVAL_SEC = 0.0   # Min seconds between face-service calls per client
-ABSENT_THRESHOLD  = 180   # Seconds missing before firing ABSENT event
+ABSENT_THRESHOLD  = 60    # Seconds missing before firing ABSENT event (1 min)
 FRAME_WIDTH       = 640   # Downscale snapshot before ML inference
 FACE_SVC_TIMEOUT  = 4     # Face service HTTP timeout
-POST_COOLDOWN_SEC = 5     # Dedup same-status events per student
+POST_COOLDOWN_SEC = 5     # Dedup same-status API calls per student (backend handles DB dedup)
 SCAN_JPEG_QUALITY = 75    # JPEG quality for face service inference
 WS_PORT           = 5005  # WebSocket port (browser connects here)
 
@@ -375,7 +375,7 @@ def main():
 
     # Start absence checker
     threading.Thread(target=absence_checker_loop, daemon=True).start()
-    log.info('⏱  Absence checker active (flags after 3 min missing)')
+    log.info('⏱  Absence checker active (flags after 1 min missing)')
 
     # Start WebSocket server
     threading.Thread(target=_ws_thread, daemon=True).start()

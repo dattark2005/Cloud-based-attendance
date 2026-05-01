@@ -110,15 +110,35 @@ const logPresenceEvent = async (req, res, next) => {
             return res.status(404).json({ success: false, message: 'Student not found' });
         }
 
-        // Save presence log
-        const log = await EntryExitLog.create({
-            userId: studentId,
-            lectureId: lecture._id,
-            type: status,          // 'SEEN' or 'ABSENT'
-            timestamp: new Date(),
-            confidence: confidence || null,
-            roomNumber: lecture.roomNumber,
-        });
+        // ── Only create a log on actual STATUS TRANSITIONS ──
+        // null → SEEN   = first detected (ENTERED room)
+        // ABSENT → SEEN = re-entered after leaving
+        // SEEN → ABSENT = has been missing ≥ 1 min (LEFT room)
+        // SEEN → SEEN   = still in frame → skip, don't spam DB
+        const thirtySecsAgo = new Date(Date.now() - 30_000);
+        const lastLog = await EntryExitLog.findOne(
+            { lectureId: lecture._id, userId: studentId, type: { $in: ['SEEN', 'ABSENT'] } },
+            null,
+            { sort: { timestamp: -1 } }
+        ).lean();
+        const prevStatus = lastLog?.type || null;
+        const isStatusChange = prevStatus !== status;
+
+        // Race-condition dedup: skip if same-type log was created within the last 30 seconds
+        // (handles two simultaneous WS connections both firing on first detection)
+        const recentDup = isStatusChange && lastLog?.type === status && lastLog?.timestamp > thirtySecsAgo;
+
+        let log = null;
+        if (isStatusChange && !recentDup) {
+            log = await EntryExitLog.create({
+                userId: studentId,
+                lectureId: lecture._id,
+                type: status,
+                timestamp: new Date(),
+                confidence: confidence || null,
+                roomNumber: lecture.roomNumber,
+            });
+        }
 
         // Recalculate present time in precise seconds
         const totalPresentSeconds = await calcPresentSeconds(lecture._id, studentId);
@@ -154,18 +174,17 @@ const logPresenceEvent = async (req, res, next) => {
             studentId,
             studentName: student.fullName,
             studentPrn: student.prn || student.email,
-            // 'SEEN' = in frame now | 'ABSENT' = left frame (temporarily out of camera view)
             status,
-            // hadPresence: true if this student was seen at any point during this lecture.
-            // Frontend uses this to distinguish "left room" (amber) vs "never appeared" (gray).
-            // A student should NEVER be shown as "Absent from lecture" just for leaving the frame.
+            // hadPresence: true if seen at any point during this lecture
             hadPresence: attendancePercentage > 0 || status === 'SEEN',
             confidence: confidence || 0,
-            timestamp: log.timestamp,
+            timestamp: log?.timestamp || new Date(),
             totalPresentMinutes: Math.round(totalPresentSeconds / 60),
             attendancePercentage,
             currentlyPresent: status === 'SEEN',
             roomNumber: lecture.roomNumber,
+            // Flag so frontend knows if this is a real status change or a heartbeat update
+            isStatusChange,
         };
 
         // Broadcast real-time update to all clients in this section
@@ -368,6 +387,68 @@ const getLectureLog = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+//  4b. GET /api/door/lecture/:lectureId/student/:studentId
+//      Per-student entry/exit timeline for teacher
+// ─────────────────────────────────────────────────────────────
+const getStudentLog = async (req, res, next) => {
+    try {
+        const { lectureId, studentId } = req.params;
+
+        const [logs, student, lecture] = await Promise.all([
+            EntryExitLog.find({ lectureId, userId: studentId })
+                .sort({ timestamp: 1 }).lean(),
+            User.findById(studentId).select('fullName prn email').lean(),
+            Lecture.findById(lectureId).select('scheduledStart scheduledEnd status roomNumber').lean(),
+        ]);
+
+        if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
+
+        // Build timeline with duration per segment
+        let totalMs = 0;
+        let lastSeenTime = null;
+        const timeline = [];
+
+        for (const log of logs) {
+            const ts = new Date(log.timestamp);
+            if (log.type === 'SEEN' || log.type === 'ENTRY') {
+                if (lastSeenTime === null) {
+                    lastSeenTime = ts;
+                    timeline.push({ type: 'ENTER', timestamp: ts, durationMs: null });
+                }
+            } else if ((log.type === 'ABSENT' || log.type === 'EXIT') && lastSeenTime !== null) {
+                const durationMs = ts - lastSeenTime;
+                totalMs += durationMs;
+                // Patch the matching ENTER with duration
+                const enterEntry = [...timeline].reverse().find(e => e.type === 'ENTER' && e.durationMs === null);
+                if (enterEntry) enterEntry.durationMs = durationMs;
+                timeline.push({ type: 'LEAVE', timestamp: ts, durationMs });
+                lastSeenTime = null;
+            }
+        }
+        // Still in room (no ABSENT yet)
+        if (lastSeenTime !== null) {
+            const durationMs = Date.now() - lastSeenTime;
+            totalMs += durationMs;
+            const enterEntry = [...timeline].reverse().find(e => e.type === 'ENTER' && e.durationMs === null);
+            if (enterEntry) enterEntry.durationMs = durationMs;
+        }
+
+        res.json({
+            success: true,
+            data: {
+                student,
+                lecture,
+                timeline,
+                totalMinutes: Math.round(totalMs / 60000),
+                totalMs,
+            },
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
 //  5. GET /api/door/my/:lectureId  (student's own log)
 // ─────────────────────────────────────────────────────────────
 const getMyLog = async (req, res, next) => {
@@ -456,7 +537,9 @@ module.exports = {
     getPresenceStatus,
     getActiveLectureStudents,
     getLectureLog,
+    getStudentLog,
     getMyLog,
     logDoorEvent,
     logVideoFrame,
 };
+
