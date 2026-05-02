@@ -104,7 +104,7 @@ _last_input_size = (0, 0)           # cache to skip redundant setInputSize calls
 
 EMBEDDING_DIM = 128          # SFace outputs 128-dim vector
 ENCODING_BYTES = EMBEDDING_DIM * 8  # 1024 bytes (float64)
-COSINE_THRESHOLD = 0.363     # OpenCV's default cosine threshold for SFace
+COSINE_THRESHOLD = 0.28      # Lowered for classroom conditions (real-world lighting/angles)
 L2_THRESHOLD = 1.128         # OpenCV's default L2 threshold for SFace
 
 # ==================== FASTAPI APP ====================
@@ -786,9 +786,9 @@ async def ws_live_detect(websocket: WebSocket):
     await websocket.accept()
     logger.info("WS /ws/live-detect client connected")
 
-    # Stricter thresholds for live detection to avoid false positives
-    WS_COSINE_THRESHOLD = 0.42   # higher than HTTP default (0.363)
-    WS_MIN_MARGIN       = 0.06   # must beat 2nd-best by this margin
+    # Thresholds for live detection — tuned for classroom conditions
+    WS_COSINE_THRESHOLD = 0.30   # lowered from 0.42 to reduce Unknown misses
+    WS_MIN_MARGIN       = 0.03   # lowered margin gate for close-confidence matches
 
     # ── Sticky identity cache (per-connection) ──
     # Stores {face_region_key: {"name": str, "conf": float, "miss_count": int}}

@@ -166,6 +166,11 @@ def launch_all(with_camera: bool):
         thread.start()
         time.sleep(0.5)  # stagger starts slightly
 
+    # Services that MUST stay alive — if they exit, stop everything
+    # The voice service (embedded inside npm run dev via concurrently) is non-critical:
+    # if it crashes, NODE and FACE keep running fine.
+    critical_indices = list(range(len(processes)))  # all processes are monitored
+
     cprint("SYS", "All services launched. Waiting... (Ctrl+C to stop)\n")
 
     # Keep alive until a process exits or Ctrl+C
@@ -174,9 +179,15 @@ def launch_all(with_camera: bool):
             for i, proc in enumerate(processes):
                 ret = proc.poll()
                 if ret is not None:
-                    cprint("SYS", f"⚠  Process {i} exited with code {ret}. Stopping all services.")
-                    shutdown()
-                    return
+                    svc_label = services[i]["label"] if i < len(services) else f"#{i}"
+                    if ret == 0:
+                        cprint("SYS", f"ℹ  [{svc_label}] exited cleanly (code 0). Stopping all.")
+                        shutdown()
+                        return
+                    else:
+                        cprint("SYS", f"⚠  [{svc_label}] exited with code {ret}. Stopping all services.")
+                        shutdown()
+                        return
             time.sleep(1)
     except KeyboardInterrupt:
         print()

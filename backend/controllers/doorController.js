@@ -110,11 +110,24 @@ const logPresenceEvent = async (req, res, next) => {
             return res.status(404).json({ success: false, message: 'Student not found' });
         }
 
+        // ── Enrollment guard: only process events for students in this section ──
+        // Fail-open if students array is empty (populate may not have returned it)
+        const enrolledIds = (lecture.sectionId?.students || []).map(id => id.toString());
+        if (enrolledIds.length > 0 && !enrolledIds.includes(studentId.toString())) {
+            console.warn(`[DOOR] 🚫 Not enrolled: studentId=${studentId} (${student.fullName}) | section=${lecture.sectionId?._id} | enrolledIds=[${enrolledIds.join(',')}]`);
+            return res.json({ success: true, message: 'Student not enrolled in active section, event ignored' });
+        }
+        if (enrolledIds.length === 0) {
+            console.warn(`[DOOR] ⚠️  enrolledIds empty for section ${lecture.sectionId?._id} — skipping guard (fail-open). Check populate.`);
+        } else {
+            console.log(`[DOOR] ✅ Enrollment OK: studentId=${studentId} (${student.fullName})`);
+        }
+
         // ── Only create a log on actual STATUS TRANSITIONS ──
         // null → SEEN   = first detected (ENTERED room)
         // ABSENT → SEEN = re-entered after leaving
         // SEEN → ABSENT = has been missing ≥ 1 min (LEFT room)
-        // SEEN → SEEN   = still in frame → skip, don't spam DB
+        // SEEN → SEEN   = still in frame → skip entirely
         const thirtySecsAgo = new Date(Date.now() - 30_000);
         const lastLog = await EntryExitLog.findOne(
             { lectureId: lecture._id, userId: studentId, type: { $in: ['SEEN', 'ABSENT'] } },
@@ -124,12 +137,14 @@ const logPresenceEvent = async (req, res, next) => {
         const prevStatus = lastLog?.type || null;
         const isStatusChange = prevStatus !== status;
 
-        // Race-condition dedup: skip if same-type log was created within the last 30 seconds
-        // (handles two simultaneous WS connections both firing on first detection)
-        const recentDup = isStatusChange && lastLog?.type === status && lastLog?.timestamp > thirtySecsAgo;
+        // Race-condition dedup: two simultaneous requests (face WS + camera sync) can both
+        // see prevStatus=null and both try to create the first SEEN log.
+        // Fix: if a log of the SAME type already exists within the last 30s → it's a dup, skip.
+        // Note: this is independent of isStatusChange (old logic had a logical contradiction).
+        const recentSameLog = lastLog?.type === status && lastLog?.timestamp > thirtySecsAgo;
 
         let log = null;
-        if (isStatusChange && !recentDup) {
+        if (isStatusChange && !recentSameLog) {
             log = await EntryExitLog.create({
                 userId: studentId,
                 lectureId: lecture._id,
@@ -140,18 +155,16 @@ const logPresenceEvent = async (req, res, next) => {
             });
         }
 
-        // Recalculate present time in precise seconds
+        // Always upsert the AttendanceRecord (updates presence time & currentlyPresent flag)
+        // but only broadcast socket update on real status transitions to avoid UI log spam
         const totalPresentSeconds = await calcPresentSeconds(lecture._id, studentId);
 
-        // Calculate exact elapsed lecture duration in seconds
         const lectureStartTime = lecture.actualStart ? new Date(lecture.actualStart).getTime() : new Date(lecture.scheduledStart).getTime();
         const elapsedSeconds = Math.max(1, Math.round((Date.now() - lectureStartTime) / 1000));
-
-        // Exact percentage based on elapsed time so far, rather than total scheduled time
         const attendancePercentage = Math.min(100, Math.round((totalPresentSeconds / elapsedSeconds) * 100));
 
         // Upsert AttendanceRecord
-        const updatedRecord = await AttendanceRecord.findOneAndUpdate(
+        await AttendanceRecord.findOneAndUpdate(
             { lectureId: lecture._id, studentId },
             {
                 $set: {
@@ -168,33 +181,28 @@ const logPresenceEvent = async (req, res, next) => {
             { upsert: true, new: true }
         );
 
-        // Build socket payload
-        const payload = {
-            lectureId: lecture._id,
-            studentId,
-            studentName: student.fullName,
-            studentPrn: student.prn || student.email,
-            status,
-            // hadPresence: true if seen at any point during this lecture
-            hadPresence: attendancePercentage > 0 || status === 'SEEN',
-            confidence: confidence || 0,
-            timestamp: log?.timestamp || new Date(),
-            totalPresentMinutes: Math.round(totalPresentSeconds / 60),
-            attendancePercentage,
-            currentlyPresent: status === 'SEEN',
-            roomNumber: lecture.roomNumber,
-            // Flag so frontend knows if this is a real status change or a heartbeat update
-            isStatusChange,
-        };
+        // ── Only broadcast on actual status transitions ──
+        // Prevents the frontend activity log from seeing heartbeat SEEN events as new entries
+        if (isStatusChange && !recentSameLog) {
+            const payload = {
+                lectureId: lecture._id,
+                studentId,
+                studentName: student.fullName,
+                studentPrn: student.prn || student.email,
+                status,
+                hadPresence: attendancePercentage > 0 || status === 'SEEN',
+                confidence: confidence || 0,
+                timestamp: log?.timestamp || new Date(),
+                totalPresentMinutes: Math.round(totalPresentSeconds / 60),
+                attendancePercentage,
+                currentlyPresent: status === 'SEEN',
+                roomNumber: lecture.roomNumber,
+                isStatusChange: true,
+            };
+            broadcastToSection(lecture.sectionId._id.toString(), 'presence:update', payload);
+        }
 
-        // Broadcast real-time update to all clients in this section
-        broadcastToSection(
-            lecture.sectionId._id.toString(),
-            'presence:update',
-            payload
-        );
-
-        res.json({ success: true, message: `${status} logged`, data: payload });
+        res.json({ success: true, message: `${status} logged`, isStatusChange, logCreated: !!(isStatusChange && !recentSameLog) });
     } catch (error) {
         next(error);
     }

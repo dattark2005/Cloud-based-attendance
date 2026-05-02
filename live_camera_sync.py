@@ -49,6 +49,7 @@ FACE_SVC_TIMEOUT  = 4     # Face service HTTP timeout
 POST_COOLDOWN_SEC = 5     # Dedup same-status API calls per student (backend handles DB dedup)
 SCAN_JPEG_QUALITY = 75    # JPEG quality for face service inference
 WS_PORT           = 5005  # WebSocket port (browser connects here)
+MIN_CONFIDENCE    = 0.25  # Minimum cosine score to consider a match valid (lowered for classroom)
 
 # ════════════════════════════════════════════════════════════
 #  Shared state
@@ -146,7 +147,7 @@ def process_scan_from_matches(matches: list):
     seen_ids: set[str] = set()
 
     for m in matches:
-        if m.get('confidence', 0) >= 0.35 and 'userId' in m:
+        if m.get('confidence', 0) >= MIN_CONFIDENCE and 'userId' in m and m.get('userId') != 'unknown':
             sid = m['userId']
             seen_ids.add(sid)
             was_absent = student_status.get(sid) == 'ABSENT'
@@ -214,7 +215,7 @@ async def ws_handler(ws: WebSocketServerProtocol):
             for m in matches:
                 conf = m.get('confidence', 0)
                 user_name = m.get('userName', m.get('userId', '?'))[:18]
-                if conf >= 0.35 or user_name == 'Unknown':
+                if conf >= MIN_CONFIDENCE or user_name == 'Unknown':
                     box = m.get('box')
                     if box:
                         orig_box = [

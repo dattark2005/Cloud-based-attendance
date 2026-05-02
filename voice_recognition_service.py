@@ -17,13 +17,28 @@ import cloudinary.uploader
 import librosa
 import numpy as np
 import soundfile as sf
-import speech_recognition as sr
+try:
+    import speech_recognition as sr
+    SR_AVAILABLE = True
+except ImportError:
+    SR_AVAILABLE = False
+    print('⚠️  speech_recognition not installed — STT disabled')
 from bson import ObjectId
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydub import AudioSegment
-from resemblyzer import VoiceEncoder, preprocess_wav
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+    print('⚠️  pydub not installed — audio conversion disabled')
+try:
+    from resemblyzer import VoiceEncoder, preprocess_wav
+    RESEMBLYZER_AVAILABLE = True
+except Exception as e:
+    RESEMBLYZER_AVAILABLE = False
+    print(f'⚠️  resemblyzer unavailable: {e} — voice recognition disabled')
 from sklearn.metrics.pairwise import cosine_similarity
 
 # ── Load .env ──
@@ -64,8 +79,17 @@ mongo_client = AsyncIOMotorClient(os.getenv('MONGODB_URI'))
 db = mongo_client.attendance
 
 # Initialize voice encoder at startup (blocking, but only once)
-encoder = VoiceEncoder()
-print("✅ Resemblyzer VoiceEncoder loaded")
+try:
+    if RESEMBLYZER_AVAILABLE:
+        encoder = VoiceEncoder()
+        print("✅ Resemblyzer VoiceEncoder loaded")
+    else:
+        encoder = None
+        print("⚠️  VoiceEncoder skipped — resemblyzer unavailable")
+except Exception as e:
+    encoder = None
+    RESEMBLYZER_AVAILABLE = False
+    print(f"⚠️  VoiceEncoder failed to load: {e} — voice endpoints will return 503")
 
 # ── Thread pool for blocking ML/audio calls ──
 # Keeps FastAPI's async event loop unblocked during heavy CPU work
@@ -150,6 +174,8 @@ async def register_voice(
     Register a user's voice by creating and storing a voice embedding.
     """
     try:
+        if not RESEMBLYZER_AVAILABLE or encoder is None:
+            raise HTTPException(status_code=503, detail="Voice recognition service is unavailable (missing resemblyzer or ffmpeg). Please install dependencies.")
         audio_bytes = await file.read()
         if not audio_bytes or len(audio_bytes) < 1000:
             raise HTTPException(status_code=400, detail="Audio file is empty or too small")
@@ -214,6 +240,8 @@ async def verify_voice(
     Order: preprocess → liveness → STT → speaker match
     """
     try:
+        if not RESEMBLYZER_AVAILABLE or encoder is None:
+            raise HTTPException(status_code=503, detail="Voice recognition service is unavailable (missing resemblyzer or ffmpeg). Please install dependencies.")
         audio_bytes = await file.read()
         if not audio_bytes or len(audio_bytes) < 1000:
             raise HTTPException(status_code=400, detail="Audio file is empty or too small")

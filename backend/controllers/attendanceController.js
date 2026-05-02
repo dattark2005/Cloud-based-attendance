@@ -355,7 +355,7 @@ const getAttendanceStatus = async (req, res, next) => {
     const presentCount = attendanceRecords.filter(r => r.status === ATTENDANCE_STATUS.PRESENT).length;
     const lateCount = attendanceRecords.filter(r => r.status === ATTENDANCE_STATUS.LATE).length;
     const markedCount = attendanceRecords.length;
-    const absentCount = totalStudents - markedCount;
+    const absentCount = Math.max(0, totalStudents - markedCount);
 
     const stats = {
       totalStudents,
@@ -363,7 +363,7 @@ const getAttendanceStatus = async (req, res, next) => {
       late: lateCount,
       marked: markedCount,
       absent: absentCount,
-      attendanceRate: totalStudents > 0 ? ((markedCount / totalStudents) * 100).toFixed(2) : 0,
+      attendanceRate: totalStudents > 0 ? Math.min(100, (markedCount / totalStudents) * 100).toFixed(2) : 0,
     };
 
     // Get list of students who haven't marked attendance
